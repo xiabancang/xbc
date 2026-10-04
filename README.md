@@ -1,4 +1,4 @@
-﻿# 夏半仓工具箱（XBC）
+# 夏半仓工具箱（XBC）
 
 一个**可插件化**的 Windows 本地工具平台内核。
 
@@ -59,7 +59,7 @@ XBC/
 │  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + ctx.ai 画面理解 + 素材资产库
 │  ├─ ai_test_plugin/        AI 能力层验收插件
 │  ├─ knowledge_base/        本地文档知识库（非本项目产物，未纳入版本管理）
-├─ tests/                    436 项测试
+├─ tests/                    451 项测试
 ├─ scripts/                  一次性运维脚本（如导出中文 CLIP 的 ONNX）
 └─ docs/                     技术方案、测试报告、调研报告
 ```
@@ -112,7 +112,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 436 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 451 tests / OK
 ```
 
 ---
@@ -427,6 +427,38 @@ python run.py tool call library_status   # 看 image_embedding 字段确认就�
 可配置项（用户层配置 `config/plugins.json`）：`scene_threshold`、`min_shot_seconds`、
 `keyframes_per_shot`、`annotate_frames_per_shot`、`max_shots`、`frame_width`、
 `match_top_n`、`match_max_chars`、`match_min_chars`。
+
+### 桌面主界面
+
+把命令行工具变成可点击操作（TASK-012b）：
+
+```powershell
+python run.py ui
+```
+
+左侧导航四项，一页对应一项，**没有预留入口**：
+
+| 导航 | 干什么 | 走哪些工具 |
+|---|---|---|
+| 工作台 | 看当前装了些什么、素材库什么状态 | Runtime + `library_status` |
+| 素材库 | 导入素材、按标签 / 语义检索 | `library_scan` / `library_status` / `library_search_semantic` / `library_search_labels` |
+| 文案匹配 | 输入文案、看 Top-N 候选、人工调整 | `script_match` / `match_show` / `match_select` / `match_reorder` |
+| 插件中心 | 启用 / 停用插件 | `PluginManager`（与 CLI 同一方法） |
+
+**界面层没有业务逻辑 —— 这是结构性的**：它 `import` 的顶层模块只有
+`PySide6` / `pathlib` / `typing`，**连插件代码都拿不到**。
+所有能力经唯一的出口 `ToolBridge.call("工具名", **参数)`
+（与 `run.py tool call` 完全同一条路）。
+
+慢操作（导入素材几十秒）走后台线程，一次一个，跑的时候整页禁用。
+
+![素材库](docs/assets/task-012b-3-library-search.png)
+
+报告：[《TASK-012b 交付报告》](docs/task-012b-ui-phase2-report.md)
+
+> **离屏截图注意**：`QT_QPA_PLATFORM=offscreen` 下 Qt 找不到字体，中文会渲染成方块。
+> 截图前要 `QFontDatabase.addApplicationFont("C:/Windows/Fonts/msyh.ttc")`。
+> 真机跑 `python run.py ui` 不受影响。
 
 ### 文案 → 镜头匹配
 

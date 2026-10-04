@@ -270,13 +270,22 @@ def cmd_smoke(ctx: Any, args: argparse.Namespace) -> int:
 
 
 def cmd_ui(ctx: Any, args: argparse.Namespace) -> int:
-    """旧的占位图形宿主。TASK-003 不做 UI，此处仅为保持入口不失效。"""
+    """启动桌面主界面（TASK-012b）。
+
+    **装配顺序与 `smoke` 一致**：先 `discover` 再 `activate_all`，
+    这样界面打开时工具就已经注册好了，各页能直接问 Runtime"有没有这个工具"。
+    界面不自己装配第二套 Runtime —— 用的就是这个 manager。
+    """
     try:
-        from .ui.shell import run_shell
+        from .ui.main import run_app
     except ImportError as exc:
         print(f"无法启动图形界面（需要 PySide6）: {exc}", file=sys.stderr)
         return 2
-    return run_shell(ctx)
+
+    manager = ctx.create_plugin_manager()
+    manager.discover()
+    manager.activate_all()
+    return run_app(ctx, manager)
 
 
 # ---------------- 参数解析 ----------------
@@ -333,7 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
     load.set_defaults(func=cmd_skill_load)
 
     sub.add_parser("smoke", help="端到端冒烟（验收用）").set_defaults(func=cmd_smoke)
-    sub.add_parser("ui", help="旧的占位图形宿主").set_defaults(func=cmd_ui)
+    sub.add_parser("ui", help="桌面主界面（工作台 / 素材库 / 文案匹配 / 插件中心）").set_defaults(func=cmd_ui)
     return parser
 
 

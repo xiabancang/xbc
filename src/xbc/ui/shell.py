@@ -1,21 +1,26 @@
-"""最小桌面管理入口（Desktop Shell MVP）。
+"""插件管理面板 + 独立窗口。
 
-TASK-004 的范围**只有管理入口**：
+TASK-004 交付的是**独立窗口**（`HostWindow`）；TASK-012b 的主界面需要把同一套
+插件管理**嵌进页面**，所以在这里拆成两层：
+
+- `PluginManagerPanel(QWidget)` —— 真正的内容。可以在独立窗口里，也可以在页面里
+- `HostWindow` —— 独立窗口，`centralWidget` 就是那个面板；
+  公开属性/方法**全部转发**给面板，所以 TASK-004 的界面 API 一字未变
+
+## 范围（TASK-004 定下的，没变）
 
 | 必须实现 | 禁止 |
 |---|---|
 | PySide6 窗口 | 登录系统 |
-| 显示插件列表 | 云端 |
-| 显示插件状态 | 商城 |
-| 启用插件 | 支付 |
-| 停用插件 | **UI 美化** |
-| 查看 Tool 列表 | 业务插件 |
-| 查看 Skill 列表 | |
+| 显示插件列表 / 状态 | 云端 |
+| 启用 / 停用插件 | 商城 |
+| 查看 Tool / Skill 列表 | 支付 |
+| | **UI 美化** |
 
-**"不做 UI 美化"是硬约束**：这里不写任何 `setStyleSheet`、不设字体、不设图标、
+**"不做 UI 美化"是硬约束**：不写任何 `setStyleSheet`、不设字体、不设图标、
 不用自绘控件。全部使用 Qt 默认外观。
 
-## 一致性保证（验收标准之一）
+## 一致性保证
 
 界面**不缓存任何状态**，也不自己判断"能不能启用"。每次刷新都重新从 Runtime 读取：
 
@@ -24,7 +29,6 @@ TASK-004 的范围**只有管理入口**：
 - 技能列表 ← `ctx.skill_catalog.specs()`
 
 启用/停用直接调用 `PluginManager.enable()` / `disable()` —— 与 CLI **同一个方法**。
-所以"桌面操作结果与 Runtime 状态一致"是**结构性保证**，而不是靠界面自觉同步。
 """
 
 from __future__ import annotations
@@ -59,21 +63,21 @@ _STATE_ORDER = {
 }
 
 
-class HostWindow:
-    """插件管理窗口。用组合而不是继承，避免界面类被 Qt 继承层次绑死。"""
+def Qt_UserRole() -> int:
+    """插件 id 在列表项里存放的 role（用整数，便于测试断言）。"""
+    return int(Qt.ItemDataRole.UserRole)
+
+
+class PluginManagerPanel(QWidget):
+    """插件管理面板。纯 Qt 控件，不含任何业务判断。"""
 
     def __init__(self, ctx: Any, manager: Any = None) -> None:
+        super().__init__()
         self.ctx = ctx
         self.manager = manager if manager is not None else ctx.create_plugin_manager()
         self.manager.discover()
 
-        self.window = QMainWindow()
-        self.window.setWindowTitle(f"{APP_NAME} v{CORE_VERSION} — 插件管理")
-        self.window.resize(960, 600)
-
-        central = QWidget()
-        self.window.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        root = QVBoxLayout(self)
 
         # ---- 顶部：标题 + 数据目录 ----
         root.addWidget(QLabel(f"{APP_NAME} v{CORE_VERSION}　数据目录：{ctx.paths.root}"))
@@ -260,13 +264,34 @@ class HostWindow:
         self.message.appendPlainText(text)
 
 
-def Qt_UserRole() -> int:
-    """插件 id 在列表项里存放的 role（用整数，便于测试断言）。"""
-    return int(Qt.ItemDataRole.UserRole)
+class HostWindow:
+    """插件管理的**独立窗口**（TASK-004 的入口，行为与 API 保持不变）。
+
+    内容全在 `PluginManagerPanel` 里；这里只做窗口装壳 + 属性转发。
+    新界面请直接用 `PluginManagerPanel` 或 `ui.main.MainWindow`。
+    """
+
+    def __init__(self, ctx: Any, manager: Any = None) -> None:
+        self.ctx = ctx
+        self.manager = manager if manager is not None else ctx.create_plugin_manager()
+
+        self.panel = PluginManagerPanel(ctx, self.manager)
+
+        self.window = QMainWindow()
+        self.window.setWindowTitle(f"{APP_NAME} v{CORE_VERSION} — 插件管理")
+        self.window.resize(960, 600)
+        self.window.setCentralWidget(self.panel)
+
+    def __getattr__(self, name: str) -> Any:
+        """把面板的公开属性/方法转发出去 —— TASK-004 的界面 API 因此一字未变。"""
+        panel = self.__dict__.get("panel")
+        if panel is not None and hasattr(panel, name):
+            return getattr(panel, name)
+        raise AttributeError(name)
 
 
 def run_shell(ctx: Any) -> int:
-    """启动桌面管理入口。"""
+    """启动桌面管理入口（TASK-004 的独立窗口）。"""
     app = QApplication.instance() or QApplication([])
     host = HostWindow(ctx)
     host.window.show()

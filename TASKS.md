@@ -574,7 +574,7 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 
 | ID | 任务 | 前置 | 备注 |
 |---|---|---|---|
-| TASK-012 | 图形界面二期：插件安装/卸载入口 + 配置编辑 | TASK-006 | 安装器是纯数据操作，界面直接调 `create_installer()` |
+| TASK-012 | 图形界面二期 ⏳ **部分完成** | TASK-006 | ✅ 主界面 + 素材库入口 + 匹配入口（[TASK-012b 报告](docs/task-012b-ui-phase2-report.md)）；**剩**：插件安装/卸载入口 + 配置编辑 |
 | TASK-013 | 打包分发（PyInstaller） | TASK-008 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
 | TASK-014 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
 | TASK-015 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-013 | 包格式、台账、AI 能力层均已就位 |
@@ -589,6 +589,7 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 | TASK-010 | 检索质量修复（存储缺陷 + 中文 CLIP + 双路融合评估） | ✅ [报告](docs/task-010-retrieval-quality-report.md) |
 | TASK-011 | 文案 → 镜头匹配 V1（Top-N 推荐 + 人工调整） | ✅ [报告](docs/task-011-script-match-report.md) |
 | TASK-012a | 修 shot_id 稳定性（A 类前置，方案先报告后实现） | ✅ [方案](docs/task-012a-shot-id-stability-plan.md) · [报告](docs/task-012a-shot-id-stability-report.md) |
+| TASK-012b | 界面二期（工作台 / 素材库 / 文案匹配 / 插件中心） | ✅ [报告](docs/task-012b-ui-phase2-report.md) |
 
 > 早期台账曾把"文案 → 镜头匹配"记为 TASK-010（那是最初排期时的编号）。
 > 甲方后续把"检索质量修复"定为 TASK-010、把"文案 → 镜头匹配"定为 TASK-011，
@@ -617,6 +618,7 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 | 2026-10-05 | TASK-010 第一部分 | **存储缺陷修复完成**：库 schema v1→v2，`vectors` 补 `embed_text`（真正被嵌入的原文）/ `kind` / `created_at`；新增 `library_audit` 工具（第 13 个）；旧库迁移后**如实标注 `auditable: false`**（旧向量无法反推原文）；重新入库后 28/28 可审计；实测坐实 TASK-009 缺陷（原来看不见的 `answer` 一直参与向量计算）；测试增至 **360 项** |
 | 2026-10-05 | TASK-010 第二/三部分 | **按任务书要求停下报告**：`chinese-clip-rn50`（Apache-2.0）已导出 ONNX 并验证**与 torch 余弦 1.00000000 精确等价**、**运行时不需要 torch**、维度 1024=1024、中文 top-1 **10/10**；但 Core 的 `EmbeddingRequest` 只收文本，**图片嵌入无法经 Core Capability** → 触发"改动 Core 需先报告"的闸门，未自行扩展。另：**等权 RRF 融合实测把 top-1 从 10/10 拉到 8/10**，如实报告建议**不做融合** |
 | 2026-10-05 | TASK-010 交付 | 按裁决（**扩 Core 支持图片嵌入 / 不做融合 / 294MB 可接受**）完成：Core 新增 `AICapability.IMAGE_EMBEDDING` + `ImageEmbeddingRequest` + `ModelProvider.embed_images()` + `AIService.embed_images()`；插件新增本地 ONNX Provider（`xbc_va_clip.py`，含**独立实现的 BERT 分词器，与官方 23/23 条等价**）；`vectors` 唯一键改为含 `provider+model`，**两个向量空间共存但不混算**；新增 `library_audit` 工具与 `scripts/export_chinese_clip_onnx.py`；**端到端实测 top-1 2/10 → 10/10**（目标 ≥6/10）；修 2 个真缺陷（能力声明与可用性不一致、插件自己判断能力） |
+| 2026-10-05 | TASK-012b 交付 | **界面二期**：新增 `ui/main.py`（左侧导航 + 页面栈）、`ui/bridge.py`（`ToolBridge` —— 界面与工具之间的**唯一通道**，慢操作走 `QThread`）、`ui/pages/`（工作台 / 素材库 / 文案匹配 / 插件中心）。**界面层 import 的顶层模块只有 `PySide6` / `pathlib` / `typing`** —— 连业务代码都拿不到，所以"界面不做业务逻辑"是结构性保证；页面对外只有 `bridge.call(工具名, **参数)`，12 处调用点覆盖 6 个工具（`video_analyzer` 另 11 个 Agent 专用工具**没有**硬塞入口）。`shell.py` 拆成 `PluginManagerPanel` + `HostWindow`（TASK-004 的 14 项界面测试**一字未改全过**）。**Core 零改动。** 通过界面自己的动作实测：导入 6 个素材（镜头 6 / 向量 24 / 可审计）、语义检索 top-1 命中 life、4 段文案 **4/4** 命中、人工调整后重开窗口调整仍在。**3 个真 bug 被测试抓出**：`call(name=...)` 与工具自己的 `name` 参数撞名、「设为首选」后候选列表变空白（信号不触发）、导入结果被概况刷新覆盖。附 6 张截图。测试 436→**451** |
 | 2026-10-05 | TASK-012a 交付 | **按确认的方案 B 修 shot_id 稳定性**：根因是 `shots.id` 为 `AUTOINCREMENT`（永不复用）+ `replace_analysis` 走 DELETE/INSERT，实测 id `1,2,3 → 4,5,6 → 7,8,9`（**0/3 不变**）；`library_rebuild` 更连 `videos.id` 都重置。方案 A（保留行 id）只让 id 变稳、**不让 id 变对**，且覆盖不到 rebuild 路径 —— 故采用**内容寻址的持久标识 `shot_key = sha1(file_hash:起:止)[:16]`**：匹配结果存 key，`shot_id` 降级为快照，读取时用当前库解析成现算 id；解析不到标 `stale` 并说明原因，**绝不静默指向错镜头**。schema v3→v4（只加列 + 回填）；工具 **17 个签名未变**；Core **零改动**。**验收实证：force 重分析与整库重建后，旧匹配结果 3/3 指向同一镜头（shot_id 仍 0/3）**。测试 423→**436** |
 | 2026-10-05 | TASK-011 交付 | 文案 → 镜头匹配 V1：**复用 TASK-010 检索，一行没重写** —— 把检索切成"准备阶段 `_retrieval_context` + 打分 `_score_query`"，检索工具与匹配共用同一实现（并有测试断言两者 `(shot_id, score)` 逐字段一致，防分叉）。新模块 `xbc_va_match.py` 只做**分段**与**结果存取**（import 只有 stdlib，零模型依赖）；分段按句末标点一级、上限 32 字（中文 CLIP 50 token 留余量），**作者写的短句不合并、只合并我们自己切出的碎片**（第一版全合并被测试抓到 `夜幕降临。` 被误并）。新增 4 个工具 `script_match` / `match_show` / `match_select` / `match_reorder`（13→17），结果存插件数据目录 `matches/<名字>.json`。新建 **16 画面语料**（一画面一视频，排除镜头切分干扰）实测：**A 组 top-1 8/9、正确项在 Top-5 内 8/9**；唯一失手是「纯黑」段（正确项排名 15/16）—— 根因实测为 **CLIP 对纯色画面区分度极低（black↔white 余弦 0.9990）** 且**无法表达"看不到任何内容"这种否定式描述**，属模型能力边界而非实现缺陷。**评测中我先按视频名标错 2 处 ground truth，看画面后修正**（6/9→8/9），过程如实记录。Core **零改动**；测试 378→**423** |
 | 2026-10-05 | 规则细化（只动文档） | 区分"远端模型 SDK"与"本地推理运行时"：**业务代码**禁止 import 远端 SDK（`openai`/`ollama`/`anthropic`/`litellm`）与 HTTP 客户端（`requests`/`httpx`/`aiohttp`/`urllib`/`http.client`）、禁止直接发起远端模型调用；**插件提供的 Provider 实现**允许 import 本地推理运行时（`onnxruntime` 等），但业务代码不得直接调用该 Provider，必须经 `ctx.ai.*`。判据是"**是否绕过能力层去够远端模型**"，不是"有没有出现某个词"。落盘到 [docs/harness-rules.md](docs/harness-rules.md)（《Harness 工作规则》原本只是会话注入，磁盘上没有这个文件）；调研台账新增本裁决与"库的类型决定能不能 import"的登记判定。**核对结果：现有禁词表本来就不含本地推理运行时，无需改代码** |
