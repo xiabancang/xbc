@@ -55,8 +55,10 @@ XBC/
 ├─ plugins/                  内置插件
 │  ├─ hello_xbc/             机制验证插件
 │  ├─ text_toolbox/          真实业务插件：纯本地文本处理
-│  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + 经 ctx.ai 的镜头级画面理解
-├─ tests/                    305 项测试
+│  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + ctx.ai 画面理解 + 素材资产库
+│  ├─ ai_test_plugin/        AI 能力层验收插件
+│  ├─ knowledge_base/        本地文档知识库（非本项目产物，未纳入版本管理）
+├─ tests/                    348 项测试
 └─ docs/                     技术方案、测试报告、调研报告
 ```
 
@@ -108,7 +110,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 305 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 348 tests / OK
 ```
 
 ---
@@ -335,7 +337,7 @@ python -m venv .venv
 |---|---|---|
 | `hello_xbc` | 机制验证（生命周期、能力、错误隔离） | `hello_probe` / `hello_greet` / `hello_fail` |
 | `text_toolbox` | 真实业务：纯本地文本处理 | `text_defaults` / `text_stats` / `text_dedupe` / `text_export` |
-| `video_analyzer` | 业务：FFmpeg 结构分析 + 经 `ctx.ai` 的镜头级画面理解 | `video_probe` / `video_split_shots` / `video_extract_keyframes` / `video_annotate` / `video_analyze` |
+| `video_analyzer` | 业务：视频结构分析 + 画面理解 + 素材资产库 | `video_*`（5 个）/ `library_*`（7 个） |
 | `ai_test_plugin` | 验收 AI 能力层：只通过 `ctx.ai` 说话 | `ai_selftest` |
 
 ### video_analyzer
@@ -358,6 +360,32 @@ python run.py tool call video_annotate --kwargs "{`"path`": `"D:/clip.mp4`"}"
 # 一次拿到完整结构
 python run.py tool call video_analyze --kwargs "{`"path`": `"D:/clip.mp4`"}"
 ```
+
+### 素材资产库
+
+把素材目录扫进库，之后可检索、可定位、可导出（库存在插件自己的数据目录，SQLite 单文件）：
+
+```powershell
+# 扫描入库（已分析且内容哈希未变的会跳过；单个文件失败不阻塞整批）
+python run.py tool call library_scan --kwargs "{`"directory`": `"D:/materials`"}"
+python run.py tool call library_status
+
+# 检索：标签（精确/模糊）与语义（自然语言）
+python run.py tool call library_search_labels   --kwargs "{`"query`": `"抽象艺术`", `"match`": `"exact`"}"
+python run.py tool call library_search_semantic --kwargs "{`"query`": `"星空`"}"
+
+# 导出选中镜头（write 风险，需显式授权）
+python run.py --yes tool call library_export --kwargs "{`"shot_id`": 1}"
+
+# 失败重试 / 整库重建（库不是唯一副本，可从视频重建）
+python run.py tool call library_retry
+python run.py tool call library_rebuild --kwargs "{`"directory`": `"D:/materials`"}"
+```
+
+**两种检索必须同时存在**：标签检索精确但只认字面（实测查"星空"命中 0 —— 标签里是"夜空/星云"）；
+语义检索能跨同义词（同一个查询 top-1 命中），但准确率受限 —— **库里的向量是 AI 画面描述文本的
+embedding，不是图片 embedding**，所以检索质量上限等于描述质量上限。
+实测与根因分析见 [《TASK-009 交付报告》](docs/task-009-video-library-v1-report.md)。
 
 > **Windows 提示**：PowerShell 会把 `--kwargs` 里的双引号吃掉。请用上面的反引号转义写法，
 > 或 `cmd /c "python run.py ... --kwargs \"{...}\""`。

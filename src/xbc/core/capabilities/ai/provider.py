@@ -74,6 +74,9 @@ class ModelProvider(ABC):
 
         不传 `request.question` → 返回 `VisionResult`（`description` + `labels`）；
         传了 → 返回 `VisionAnswer`（`answer` + `labels`）。
+
+        实现必须把 `len(request.images)` 传给 `vision_prompt()`，
+        否则多张图片仍会收到"这张图片"的单数提示词 —— 接口与提示词就不自洽了。
         """
         raise AIUnsupported(f"Provider {self.name!r} 不支持视觉理解（vision_analyze）")
 
@@ -118,10 +121,22 @@ _VISION_PROMPT = (
     "要求：description 用一到三句话描述画面内容；labels 给出 3 到 8 个简短标签。"
 )
 
+#: 多张图片时的描述提示词。
+#:
+#: 接口收的是列表，提示词就必须能表达"多张" —— 否则调用方读不出
+#: "多张图是各自分析还是合成一次判断"。这里把语义定死：**同一场景的不同视角或时刻，综合成一次判断**。
+_VISION_PROMPT_MULTI = (
+    "请综合分析这 __COUNT__ 张图片（同一场景的不同视角或时刻），"
+    "并**只**输出一个 JSON 对象，不要输出任何其他文字或代码块标记。\n"
+    '格式：{"description": "对画面的整体描述", "labels": ["标签1", "标签2"]}\n'
+    "要求：description 用一到三句话描述这些图片**共同**呈现的内容；"
+    "labels 给出 3 到 8 个覆盖它们共性的简短标签。"
+)
+
 #: 定向提问模式的提示词前缀。问题原文接在后面。
 #:
 #: 用拼接而不是 `str.format()`：调用方的问题里可能出现花括号，
-#: 那会让格式化直接抛异常。
+#: 而提示词里本来就有 JSON 的花括号，两者混在一起必然出错。
 _VISION_QUESTION_PROMPT_HEAD = (
     "请根据这张图片回答问题，并**只**输出一个 JSON 对象，不要输出任何其他文字或代码块标记。\n"
     '格式：{"answer": "对问题的回答", "labels": ["标签1", "标签2"]}\n'
@@ -129,16 +144,35 @@ _VISION_QUESTION_PROMPT_HEAD = (
     "问题："
 )
 
+#: 多张图片时的定向提问前缀。语义同上：综合成一次判断。
+_VISION_QUESTION_PROMPT_MULTI_HEAD = (
+    "请根据这 __COUNT__ 张图片（同一场景的不同视角或时刻）回答问题，"
+    "并**只**输出一个 JSON 对象，不要输出任何其他文字或代码块标记。\n"
+    '格式：{"answer": "对问题的回答", "labels": ["标签1", "标签2"]}\n'
+    "要求：answer 综合这些图片直接回答问题；"
+    "labels 给出 3 到 8 个与画面相关的简短标签。\n"
+    "问题："
+)
 
-def vision_prompt(question: str | None = None) -> str:
-    """按模式给出内置提示词。
+
+def vision_prompt(question: str | None = None, *, image_count: int = 1) -> str:
+    """按模式与**图片张数**给出内置提示词。
 
     - 不给 `question`：描述模式，要求输出 `description` + `labels`
     - 给了 `question`：定向提问模式，要求输出 `answer` + `labels`
+    - `image_count > 1`：换用"综合分析这几张图"的措辞，与 `images` 列表自洽
+
+    单张的措辞与之前逐字相同 —— 这次只补上"多张"这一种情况的表达。
     """
+    count = max(1, int(image_count))
+    multi = count > 1
     if question:
-        return _VISION_QUESTION_PROMPT_HEAD + question
-    return _VISION_PROMPT
+        head = _VISION_QUESTION_PROMPT_MULTI_HEAD if multi else _VISION_QUESTION_PROMPT_HEAD
+    else:
+        head = _VISION_PROMPT_MULTI if multi else _VISION_PROMPT
+
+    text = head.replace("__COUNT__", str(count))
+    return f"{text}{question}" if question else text
 
 
 def parse_vision_payload(text: str, *, field: str = "description") -> tuple[str, list[str]]:

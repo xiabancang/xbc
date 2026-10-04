@@ -188,7 +188,8 @@ class OllamaProvider(ModelProvider):
             raise AIResponseError("vision_analyze 至少需要一张本地图片路径")
         model = self._require_model(self.model)
         generated = self._generate(
-            vision_prompt(request.question), system=None, images=list(request.images),
+            vision_prompt(request.question, image_count=len(request.images)),
+            system=None, images=list(request.images),
             model=model, json_mode=True,
         )
         if request.question:

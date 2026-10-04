@@ -181,7 +181,8 @@ class OpenAICompatibleProvider(ModelProvider):
         self._require_ready()
         model = self._require_model(self.model)
         generated = self._chat(
-            vision_prompt(request.question), system=None, images=list(request.images),
+            vision_prompt(request.question, image_count=len(request.images)),
+            system=None, images=list(request.images),
             model=model, json_mode=True,
         )
         if request.question:

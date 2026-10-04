@@ -41,6 +41,9 @@ from typing import Any
 from xbc.core.capabilities.ai import AIError
 from xbc.core.contract.plugin import XbcPlugin
 
+# 模块名带 xbc_va_ 前缀，避免与其他插件撞名（插件共享同一个 sys.modules）
+from xbc_va_library import Library, LibraryError, cosine  # noqa: E402
+
 #: 从 ffmpeg showinfo 输出里取时间戳（V18 同款正则）
 _SCENE_TIME_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 
@@ -50,10 +53,45 @@ FRAME_QUESTION = "这个画面的主要内容是什么？属于什么场景或�
 #: 一次标注最多分析多少帧（安全上限，避免把长视频送去跑几十次 AI）
 MAX_ANNOTATED_FRAMES = 24
 
+#: 素材库文件名与导出目录（都在插件自己的数据目录里）
+LIBRARY_DB_NAME = "library.db"
+EXPORT_DIR_NAME = "exports"
+FRAME_DIR_NAME = "frames"
+
 VIDEO_SUFFIXES = {
     ".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv",
     ".m4v", ".ts", ".wmv", ".mpg", ".mpeg", ".rmvb",
 }
+
+
+def _hash_file(path: Path, chunk: int = 1024 * 1024) -> str:
+    """按内容算 SHA-256。
+
+    这里直接 `open()` 而不是走 `ctx.files`：**`ctx.files` 没有二进制读取或哈希能力**
+    （只有 read_text / write_text / read_json / copy / size）。
+    加一个哈希能力属于"新增 Core 能力"，本任务禁止 —— 所以记进报告的接口缺口，
+    在插件内自行实现。
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            block = handle.read(chunk)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _mean_vector(vectors: list[list[float]], dim: int) -> list[float]:
+    """把一个镜头内多帧的向量求平均，作为镜头级向量。
+
+    单帧时就是它自己。多帧时是一个粗糙的质心 —— 足以支撑"找相关镜头"，
+    但不做任何归一化或加权（那是检索质量调优，超出本任务范围）。
+    """
+    usable = [v for v in vectors if len(v) == dim]
+    if not usable:
+        return []
+    return [sum(v[i] for v in usable) / len(usable) for i in range(dim)]
 
 #: 单次调用最多抽取多少帧（安全上限，避免在长视频上跑爆）
 MAX_FRAMES_TOTAL = 240
@@ -254,12 +292,99 @@ class VideoAnalyzerPlugin(XbcPlugin):
             risk="read",
         )
 
+        # ---------------- 素材库工具 ----------------
+        # 输出结构较深，这里只声明"是对象" —— 不写会误导的强约束，
+        # 但仍让内核校验输出确实是结构化对象。
+        object_output = {"type": "object"}
+
+        ctx.tools.register(
+            "library_scan", self.library_scan,
+            description="扫描目录，把新视频与内容变化的视频分析入库（已分析且内容哈希未变的跳过）",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string", "minLength": 1},
+                    "force": {"type": "boolean", "description": "即使哈希未变也重新分析"},
+                },
+                "required": ["directory"],
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "library_retry", self.library_retry,
+            description="重试库里状态为 failed / pending 的视频",
+            input_schema={
+                "type": "object",
+                "properties": {"directory": {"type": "string"}},
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "library_rebuild", self.library_rebuild,
+            description="丢弃当前库并从视频文件重新建立（库损坏或丢失时用）",
+            input_schema={
+                "type": "object",
+                "properties": {"directory": {"type": "string", "minLength": 1}},
+                "required": ["directory"],
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "library_status", self.library_status,
+            description="查看素材库规模：视频数、镜头数、帧数、标签数、失败项",
+            input_schema={"type": "object", "properties": {}},
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "library_search_labels", self.library_search_labels,
+            description="按标签检索镜头（match=exact 精确 / fuzzy 模糊子串）",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1},
+                    "match": {"type": "string", "enum": ["fuzzy", "exact"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+                "required": ["query"],
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "library_search_semantic", self.library_search_semantic,
+            description="语义检索：输入自然语言，返回最相关的镜头（用 embedding 计算相似度）",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+                "required": ["query"],
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "library_export", self.library_export,
+            description="把选中的镜头导出成可再剪辑的视频片段（H.264/MP4，时间码精确）",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "shot_id": {"type": "integer", "minimum": 1},
+                    "output": {"type": "string", "description": "输出路径；留空写到插件数据目录"},
+                },
+                "required": ["shot_id"],
+            },
+            output_schema=object_output,
+            # 导出会在插件私有目录之外产生一个**用户要用的文件**，
+            # 按本项目的 risk 定义这属于 write（需显式授权）。
+            risk="write",
+        )
+
         if not ctx.ffmpeg.available():
             self.log.warning(
                 "未检测到 FFmpeg：video_analyzer 的工具会在调用时明确报错，"
                 "请安装 FFmpeg 或配置 ffmpeg.ffmpeg_path"
             )
-        self.log.info("apply：已注册 5 个视频工具，配置 = %s", self._cfg)
+        self.log.info("apply：已注册 12 个视频工具，配置 = %s", self._cfg)
 
     # ---------------- 工具实现 ----------------
     def video_probe(self, path: str) -> dict[str, Any]:
@@ -476,6 +601,401 @@ class VideoAnalyzerPlugin(XbcPlugin):
                     if media.get("video") else None
                 ),
             },
+        }
+
+    # ---------------- 素材库：扫描 / 分析 ----------------
+    def _library(self) -> Library:
+        library = Library(self.ctx.data_dir / LIBRARY_DB_NAME)
+        library.initialize()
+        return library
+
+    def _scan_root(self, directory: str) -> Path:
+        root = Path(str(directory)).expanduser()
+        if not root.is_dir():
+            raise ValueError(f"目录不存在或不是目录：{root}")
+        return root
+
+    def _video_files(self, root: Path) -> list[Path]:
+        return sorted(
+            path for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+        )
+
+    @staticmethod
+    def _skip_reason(existing: Any, digest: str, force: bool) -> str:
+        """判断这个视频能否跳过。**只看内容哈希与状态**，不看路径或修改时间。"""
+        if force or existing is None:
+            return ""
+        if existing["file_hash"] != digest:
+            return ""
+        if existing["status"] != "ok":
+            return ""
+        return f"内容哈希未变（{digest[:16]}）且状态为 ok"
+
+    def library_status(self) -> dict[str, Any]:
+        library = self._library()
+        stats = library.stats()
+        stats["not_ok"] = [
+            {"path": row["path"], "status": row["status"], "error": row["error"]}
+            for row in library.videos() if row["status"] != "ok"
+        ]
+        return stats
+
+    def library_scan(self, directory: str, force: bool = False) -> dict[str, Any]:
+        """扫描目录并把视频分析入库。
+
+        - 已分析且**内容哈希未变**的跳过（不按路径、不按修改时间）
+        - 内容变了就重新分析（`upsert_video` 会级联清掉旧结果）
+        - **单个视频失败不阻塞整体**：记进 `failed` 并把状态置为 failed，可重试
+        """
+        root = self._scan_root(directory)
+        library = self._library()
+        candidates = self._video_files(root)
+
+        report: dict[str, Any] = {
+            "directory": str(root), "found": len(candidates), "force": bool(force),
+            "analyzed": [], "skipped": [], "failed": [],
+        }
+
+        for path in candidates:
+            digest = _hash_file(path)
+            existing = library.get_video_by_path(str(path))
+            reason = self._skip_reason(existing, digest, force)
+            if reason:
+                report["skipped"].append(
+                    {"path": str(path), "hash": digest[:16], "reason": reason}
+                )
+                continue
+            try:
+                report["analyzed"].append(self._analyze_into_library(library, path, digest))
+            except Exception as exc:  # noqa: BLE001 - 一个坏文件不能毁掉整次扫描
+                # 失败也要**留下记录**，否则 library_retry 找不到它、永远重试不了。
+                # 早期实现在这里只对"已存在的记录"置失败，导致连探信息都失败的坏文件
+                # 直接消失在库里 —— 用户看到 failed=1 却找不到是哪一条。
+                record = library.get_video_by_path(str(path))
+                video_id = (
+                    int(record["id"]) if record is not None
+                    else library.upsert_video(
+                        path=str(path), file_hash=digest,
+                        size_bytes=path.stat().st_size, status="failed",
+                    )
+                )
+                library.set_status(video_id, "failed", str(exc))
+                self.log.error("分析失败 %s：%s", path, exc)
+                report["failed"].append({"path": str(path), "error": str(exc)})
+
+        report["summary"] = {
+            "analyzed": len(report["analyzed"]),
+            "skipped": len(report["skipped"]),
+            "failed": len(report["failed"]),
+            "library": library.stats(),
+        }
+        return report
+
+    def library_retry(self, directory: str | None = None) -> dict[str, Any]:
+        """重试未成功的视频（failed 与 pending 都算）。
+
+        `pending` 是"分析中途断了"留下的状态 —— 所以扫描被中断后不需要重新扫全量，
+        直接 retry 就能接着跑。
+        """
+        library = self._library()
+        root = Path(str(directory)).expanduser() if directory else None
+        pending = [row for row in library.videos() if row["status"] != "ok"]
+        if root is not None:
+            pending = [
+                row for row in pending
+                if Path(row["path"]).is_relative_to(root)
+            ]
+
+        report: dict[str, Any] = {
+            "candidates": len(pending), "analyzed": [], "failed": [], "missing": [],
+        }
+        for row in pending:
+            path = Path(row["path"])
+            if not path.is_file():
+                library.set_status(int(row["id"]), "failed", "文件不存在，无法重试")
+                report["missing"].append(str(path))
+                continue
+            try:
+                report["analyzed"].append(
+                    self._analyze_into_library(library, path, _hash_file(path))
+                )
+            except Exception as exc:  # noqa: BLE001 - 继续重试下一个
+                library.set_status(int(row["id"]), "failed", str(exc))
+                self.log.error("重试失败 %s：%s", path, exc)
+                report["failed"].append({"path": str(path), "error": str(exc)})
+
+        report["summary"] = {
+            "analyzed": len(report["analyzed"]),
+            "failed": len(report["failed"]),
+            "missing": len(report["missing"]),
+            "library": library.stats(),
+        }
+        return report
+
+    def library_rebuild(self, directory: str) -> dict[str, Any]:
+        """整库丢弃后重建。
+
+        库不是唯一副本：视频文件还在，分析结果可以全部重算。
+
+        **不经过 `_library()`**：那个方法会先 `initialize()`，而库文件损坏时
+        恰恰打不开（`file is not a database`）—— 那样重建就永远救不回来。
+        这里的顺序是"先尽力读一下旧统计（失败也无所谓）→ 删文件 → 建新库"。
+        """
+        root = self._scan_root(directory)
+        library = Library(self.ctx.data_dir / LIBRARY_DB_NAME)
+
+        try:
+            before = library.stats()
+        except Exception as exc:  # noqa: BLE001 - 库已经坏了，读不到统计很正常
+            self.log.warning("重建前读不出旧库统计（按已损坏处理）：%s", exc)
+            before = {"videos_total": None, "shots": None, "labels": None}
+
+        library.drop()
+        library.initialize()
+        self.log.info("素材库已丢弃并重建：%s", library.path)
+
+        report = self.library_scan(str(root), force=True)
+        report["rebuilt"] = {
+            "library_path": str(library.path),
+            "dropped": {
+                "videos": before["videos_total"],
+                "shots": before["shots"],
+                "labels": before["labels"],
+            },
+        }
+        return report
+
+    def _analyze_into_library(
+        self, library: Library, source: Path, digest: str
+    ) -> dict[str, Any]:
+        """把一个视频完整分析入库：探信息 → 切镜头 → 抽帧 → AI 理解 → 向量化。
+
+        向量化的是**镜头画面的文字描述**（AI 的 answer + labels），不是图片本身 ——
+        `ctx.ai.embedding` 收的是文本。所以语义检索实际匹配的是
+        「查询文本 ↔ AI 画面描述文本」。这一点在报告里明确写了。
+        """
+        media = self._probe(source)
+        duration = self._duration(source)
+        video_meta = media.get("video") or {}
+
+        video_id = library.upsert_video(
+            path=str(source), file_hash=digest,
+            size_bytes=int(media.get("size_bytes") or 0),
+            duration_seconds=media.get("duration_seconds"),
+            width=video_meta.get("width"), height=video_meta.get("height"),
+            fps=video_meta.get("fps"), status="pending",
+        )
+        library.set_status(video_id, "pending")
+
+        per_shot = max(1, min(4, int(self._number(None, "annotate_frames_per_shot", 1))))
+        shots = self._build_shots(
+            duration,
+            self._scene_times(source, self._number(None, "scene_threshold", 0.3)),
+            self._number(None, "min_shot_seconds", 0.5),
+            int(self._number(None, "max_shots", 200)),
+        )
+        extracted = self._extract_frames(source, shots, per_shot)
+
+        by_shot: dict[int, list[dict[str, Any]]] = {}
+        for frame in extracted["frames"]:
+            by_shot.setdefault(frame["shot_index"], []).append(frame)
+
+        payload: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        analyzed = 0
+        provider = model = ""
+
+        for shot in shots:
+            frame_records: list[dict[str, Any]] = []
+            frame_vectors: list[dict[str, Any]] = []
+            labels: list[str] = []
+
+            for frame in by_shot.get(shot["index"], []):
+                if analyzed >= MAX_ANNOTATED_FRAMES:
+                    break
+                try:
+                    annotated = self.ctx.ai.vision_analyze(
+                        [frame["file"]], question=FRAME_QUESTION
+                    )
+                except AIError as exc:
+                    errors.append({"frame": frame["file"], "error": str(exc)})
+                    continue
+
+                labeled = ""
+                try:
+                    text_for_embedding = " ".join(
+                        [annotated.answer, *annotated.labels]
+                    ).strip()
+                    embedded = self.ctx.ai.embedding([text_for_embedding])
+                    labeled = text_for_embedding
+                except AIError as exc:
+                    errors.append({"frame": frame["file"], "error": str(exc)})
+                    embedded = None
+
+                provider, model = annotated.provider, annotated.model
+                analyzed += 1
+                for label in annotated.labels:
+                    if label not in labels:
+                        labels.append(label)
+
+                frame_records.append({"time": frame["time"], "file": frame["file"]})
+                if embedded is not None and embedded.vectors:
+                    frame_vectors.append({
+                        "frame_index": len(frame_records) - 1,
+                        "provider": embedded.provider, "model": embedded.model,
+                        "dim": embedded.dim, "values": embedded.vectors[0],
+                    })
+                del labeled
+
+            vector = None
+            if frame_vectors:
+                dim = frame_vectors[0]["dim"]
+                values = _mean_vector([item["values"] for item in frame_vectors], dim)
+                if values:
+                    vector = {
+                        "provider": frame_vectors[0]["provider"],
+                        "model": frame_vectors[0]["model"], "dim": dim, "values": values,
+                    }
+
+            payload.append({
+                "index": shot["index"], "start": shot["start"], "end": shot["end"],
+                "duration": shot["duration"], "frames": frame_records,
+                "labels": labels, "frame_vectors": frame_vectors, "vector": vector,
+            })
+
+        if analyzed == 0:
+            first = errors[0]["error"] if errors else "没有可用关键帧"
+            raise AIError(f"这个视频一帧都没分析成功，未入库：{first}")
+
+        library.replace_analysis(
+            video_id, shots=payload, ai_provider=provider, ai_model=model
+        )
+        library.set_status(video_id, "ok")
+        self.log.info("已入库 %s：%d 个镜头 / %d 帧", source.name, len(payload), analyzed)
+
+        return {
+            "path": str(source), "hash": digest[:16],
+            "duration_seconds": round(duration, 3),
+            "shots": len(payload), "frames_analyzed": analyzed,
+            "labels": sorted({label for shot in payload for label in shot["labels"]}),
+            "ai": {"provider": provider, "model": model},
+            "errors": len(errors),
+        }
+
+    # ---------------- 素材库：检索 ----------------
+    def library_search_labels(
+        self, query: str, match: str = "fuzzy", limit: int = 10
+    ) -> dict[str, Any]:
+        """标签检索。**只是字符串匹配** —— 需要"同义但不同字"时必须用语义检索。"""
+        library = self._library()
+        mode = match if match in ("exact", "fuzzy") else "fuzzy"
+        results = library.search_labels(query, limit=int(limit), match=mode)
+        return {
+            "query": query, "mode": f"labels/{mode}",
+            "count": len(results), "results": results,
+        }
+
+    def library_search_semantic(self, query: str, limit: int = 10) -> dict[str, Any]:
+        """语义检索：把查询文本向量化，与库里的镜头向量比余弦相似度。
+
+        **跨 Provider / 跨模型的向量不可比较**（TASK-007 的约束）。
+        这里显式剔除不在同一空间的向量并报告数量，而不是算出一个看似合理的分数。
+        """
+        library = self._library()
+        stored = library.shot_vectors()
+        if not stored:
+            return {
+                "query": query, "mode": "semantic", "count": 0, "results": [],
+                "note": "库里还没有向量：先跑 library_scan 入库",
+            }
+
+        embedded = self.ctx.ai.embedding([query])
+        query_vector = embedded.vectors[0]
+        usable = [
+            item for item in stored
+            if item["model"] == embedded.model and item["dim"] == len(query_vector)
+        ]
+        skipped = len(stored) - len(usable)
+
+        scored = sorted(
+            ({"score": round(cosine(query_vector, item["values"]), 4), **item}
+             for item in usable),
+            key=lambda row: row["score"], reverse=True,
+        )[: max(1, int(limit))]
+        labels = library.shot_labels([row["shot_id"] for row in scored])
+
+        return {
+            "query": query, "mode": "semantic", "count": len(scored),
+            "embedding": {
+                "provider": embedded.provider, "model": embedded.model,
+                "dim": len(query_vector),
+            },
+            "candidates": len(stored), "skipped_other_space": skipped,
+            "results": [
+                {
+                    "score": row["score"],
+                    "video_path": row["video_path"],
+                    "shot_id": row["shot_id"], "shot_index": row["shot_index"],
+                    "start": round(row["start"], 3), "end": round(row["end"], 3),
+                    "duration": round(row["duration"], 3),
+                    "labels": labels.get(row["shot_id"], []),
+                }
+                for row in scored
+            ],
+        }
+
+    # ---------------- 素材库：导出 ----------------
+    def library_export(self, shot_id: int, output: str | None = None) -> dict[str, Any]:
+        """把选中的镜头导出成可再剪辑的片段。
+
+        用**输出侧定位**（`-ss` 放在 `-i` 之后）而不是输入侧快速定位：
+        快速定位会从最近的关键帧开始解码，时间码不一定精确；
+        本任务的验收标准是"时间码正确"，所以选精确的那条路。
+        """
+        library = self._library()
+        shot = library.shot(int(shot_id))
+        if shot is None:
+            raise ValueError(f"库里没有这个镜头：shot_id={shot_id}")
+
+        source = Path(shot["video_path"])
+        if not source.is_file():
+            raise ValueError(f"源视频不存在（库记录已失效，可重新扫描）：{source}")
+
+        start = float(shot["start_seconds"])
+        end = float(shot["end_seconds"])
+        duration = max(0.05, end - start)
+
+        if output:
+            target = Path(str(output)).expanduser()
+            self.ctx.files.ensure_dir(target.parent)
+        else:
+            out_dir = self.ctx.files.ensure_dir(self.ctx.data_dir / EXPORT_DIR_NAME)
+            target = out_dir / f"{source.stem}_shot{int(shot['shot_index']):03d}.mp4"
+
+        self.ctx.ffmpeg.run(
+            [
+                "-y", "-hide_banner", "-nostats",
+                "-i", str(source),
+                "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "160k",
+                "-movflags", "+faststart",
+                str(target),
+            ],
+            timeout=600,
+        )
+        if not target.is_file():
+            raise ValueError(f"导出失败，未生成文件：{target}")
+
+        return {
+            "shot_id": int(shot_id), "video_path": str(source),
+            "shot_index": int(shot["shot_index"]),
+            "start": round(start, 3), "end": round(end, 3),
+            "duration": round(duration, 3),
+            "output": str(target), "size_bytes": self.ctx.files.size(target),
+            "labels": list(shot["labels"]),
         }
 
     # ---------------- 内部：校验与查询 ----------------

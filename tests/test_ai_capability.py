@@ -423,6 +423,64 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(EmbeddingResult(vectors=[]).dim, 0, "空结果维度为 0，不是异常")
 
 
+class CoreInterfaceFixTests(unittest.TestCase):
+    """TASK-009 第 1 节：修 TASK-008 报告里"确定要改"的两处接口问题。
+
+    只允许改这两处；范围由 `xbc_scope_t9.py` 的哈希对比另行证明。
+    """
+
+    def test_labels_semantics_declared_in_module_doc(self) -> None:
+        text = (AI_CAPABILITY_DIR / "types.py").read_text(encoding="utf-8")
+        self.assertIn("自由文本", text)
+        self.assertIn("不保证可枚举", text)
+        self.assertIn("不保证归一", text)
+
+    def test_labels_semantics_declared_on_both_result_types(self) -> None:
+        """两个结果类自己的说明里都要有 —— 只看类的人不能漏掉这条约束。"""
+        self.assertIn("不保证可枚举", VisionResult.__doc__ or "")
+        self.assertIn("不保证可枚举", VisionAnswer.__doc__ or "")
+        self.assertIn("VisionResult", VisionAnswer.__doc__ or "", "应指回详细说明")
+
+    def test_labels_semantics_is_reachable_from_the_public_export(self) -> None:
+        from xbc.core.capabilities.ai import VisionResult as Exported
+
+        self.assertIn("自由文本", Exported.__doc__ or "")
+
+    # ---------- 提示词与 images 列表自洽 ----------
+    def test_single_prompt_keeps_singular_wording(self) -> None:
+        self.assertIn("这张图片", vision_prompt())
+        self.assertIn("这张图片", vision_prompt(image_count=1))
+
+    def test_multi_prompt_drops_singular_wording(self) -> None:
+        multi = vision_prompt(image_count=3)
+        self.assertNotIn("这张图片", multi, "多张图不能再用单数措辞")
+        self.assertIn("3 张图片", multi)
+        self.assertIn("综合", multi)
+
+    def test_multi_question_prompt_is_consistent_too(self) -> None:
+        multi = vision_prompt("画面里有几个人？", image_count=2)
+        self.assertNotIn("这张图片", multi)
+        self.assertIn("2 张图片", multi)
+        self.assertIn("画面里有几个人？", multi, "问题原文必须原样保留")
+
+    def test_image_count_is_clamped_to_at_least_one(self) -> None:
+        for count in (0, -3):
+            self.assertNotIn("张图片（", vision_prompt(image_count=count).split("，")[0] or "")
+            self.assertIn("这张图片", vision_prompt(image_count=count))
+
+    def test_prompt_braces_survive_both_modes(self) -> None:
+        question = "描述 {这个} 画面 {0}"
+        for count in (1, 3):
+            prompt = vision_prompt(question, image_count=count)
+            self.assertIn("{这个}", prompt)
+            self.assertIn("{0}", prompt)
+            self.assertIn('"answer"', prompt)
+
+    def test_multi_prompt_keeps_json_shape(self) -> None:
+        self.assertIn('"description"', vision_prompt(image_count=2))
+        self.assertIn('"answer"', vision_prompt("q", image_count=2))
+
+
 class VisionQuestionModeTests(unittest.TestCase):
     """TASK-008：`vision_analyze` 的定向提问模式。
 
@@ -691,6 +749,15 @@ class OllamaProviderTests(_ServerBase):
         sent = self.server.last("/api/generate")["payload"]
         self.assertIn("画面里有什么颜色？", sent["prompt"], "问题必须出现在发给模型的提示词里")
         self.assertEqual(sent["format"], "json")
+
+    def test_vision_prompt_scales_with_image_count(self) -> None:
+        """Provider 必须把实际张数传给提示词构造 —— 否则多张仍收到单数提示词。"""
+        images = [str(self.png(f"a{index}.png")) for index in range(2)]
+        self.provider().vision_analyze(VisionRequest(images=images))
+
+        sent = self.server.last("/api/generate")["payload"]["prompt"]
+        self.assertIn("2 张图片", sent)
+        self.assertNotIn("这张图片", sent)
 
     def test_vision_rejects_network_url(self) -> None:
         with self.assertRaises(AIError) as ctx:

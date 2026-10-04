@@ -273,15 +273,32 @@ class VideoAnalyzerTests(unittest.TestCase):
 
     # ---------------- 1. 独立安装 ----------------
     def test_plugin_has_no_third_party_dependencies(self) -> None:
-        """独立安装的前提：只依赖标准库与内核契约，不引入任何第三方包。"""
+        """独立安装的前提：只依赖标准库、内核契约、以及插件自己的模块。
+
+        插件目录会被插入 `sys.path`，所以同目录的兄弟模块（`xbc_va_*`）是**插件自身代码**，
+        不是第三方依赖。命名统一带 `xbc_` 前缀就是为此（避免与其他插件撞名）。
+        """
         source = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
         imported = set(re.findall(r"^(?:from|import)\s+([A-Za-z_][\w.]*)", source, re.MULTILINE))
         self.assertTrue(imported, "前置条件：应能从源码解析出 import")
 
-        allowed = set(sys.stdlib_module_names) | {"xbc", "__future__"}
+        local_modules = {
+            path.stem for path in PLUGIN_DIR.glob("*.py")
+        }
+        allowed = set(sys.stdlib_module_names) | {"xbc", "__future__"} | local_modules
         for name in imported:
             top = name.split(".")[0]
             self.assertIn(top, allowed, f"插件引入了非标准库依赖：{name}")
+
+    def test_local_modules_are_prefixed_to_avoid_collisions(self) -> None:
+        """插件共享同一个 sys.modules —— 兄弟模块必须带唯一前缀。"""
+        for path in PLUGIN_DIR.glob("*.py"):
+            if path.stem == "plugin":
+                continue
+            self.assertTrue(
+                path.stem.startswith("xbc_va_"),
+                f"{path.name} 应以 xbc_va_ 前缀命名，避免和其他插件撞名",
+            )
 
     def test_standalone_install_into_user_plugin_dir(self) -> None:
         """把插件文件夹复制进用户插件目录 → Runtime 能发现 → Tool 能调用。"""
