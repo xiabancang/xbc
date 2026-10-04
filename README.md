@@ -44,7 +44,7 @@ XBC/
 │  │  ├─ contract/           契约：清单 / 钩子 / 插件基类
 │  │  ├─ runtime/            运行时：作用域 / 分层注册表 / 生命周期
 │  │  ├─ capabilities/       能力：files / ffmpeg / events / settings
-│  │  │  └─ ai/              AI 能力层：接口 + Provider 抽象 + Ollama / OpenAI 兼容
+│  │  │  └─ ai/              AI 能力层：接口 + Provider 抽象 + providers/（ollama / openai_compatible）
 │  │  ├─ tools/              工具注册表 + JSON Schema 校验（自研）
 │  │  ├─ skills/             技能注册表（目录 / 按需加载 / 调用策略）
 │  │  ├─ config/             三层配置装配
@@ -56,7 +56,7 @@ XBC/
 │  ├─ hello_xbc/             机制验证插件
 │  ├─ text_toolbox/          真实业务插件：纯本地文本处理
 │  └─ video_analyzer/        真实业务插件：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取
-├─ tests/                    255 项测试
+├─ tests/                    278 项测试
 └─ docs/                     技术方案、测试报告、调研报告
 ```
 
@@ -334,7 +334,7 @@ python -m venv .venv
 | `hello_xbc` | 机制验证（生命周期、能力、错误隔离） | `hello_probe` / `hello_greet` / `hello_fail` |
 | `text_toolbox` | 真实业务：纯本地文本处理 | `text_defaults` / `text_stats` / `text_dedupe` / `text_export` |
 | `video_analyzer` | 真实业务：基于 FFmpeg 的视频结构分析 | `video_probe` / `video_split_shots` / `video_extract_keyframes` / `video_analyze` |
-| `ai_probe` | 验证 AI 能力层：只通过 `ctx.ai` 说话 | `ai_status` / `ai_text` / `ai_vision` / `ai_embed` |
+| `ai_test_plugin` | 验证 AI 能力层：只通过 `ctx.ai` 说话 | `ai_status` / `ai_text` / `ai_vision` / `ai_embed` |
 
 ### video_analyzer
 
@@ -368,6 +368,8 @@ AI 是 **Core Capability**：插件通过 `ctx.ai` 使用，**不允许**直接�
 直接 import 某个模型的 SDK。这条不是口号 —— 有一条测试会扫描所有插件源码，
 发现 `requests` / `httpx` / `ollama` / `openai` / `urllib.request` 等就失败。
 
+> 完整验收结果见 [《AI Capability Layer V1 测试报告》](docs/ai-capability-v1-test-report.md)。
+
 ### 三个能力入口
 
 ```python
@@ -379,7 +381,7 @@ ctx.ai.embedding(["第一段", "第二段"])                        # → Embedd
 结果类型带 `provider` / `model` / `usage`，所以出问题时能说清**是谁生成的**。
 `json_mode=True` 时用 `result.json()` 拿解析后的对象。
 
-### Provider 抽象
+### Provider 机制
 
 插件只依赖能力层，**Provider 是内核的装配细节**。换 Provider 不需要改任何插件代码：
 
@@ -392,8 +394,12 @@ ctx.ai.text_generate("你好", provider="openai_compatible")   # 也可以按调
 | `ollama` | 本地，默认注册 | ✅ | ✅ | ✅ |
 | `openai_compatible` | **接口预留**，配置了 `base_url` 才注册 | ✅ | ✅ | ✅ |
 
-`openai_compatible` 面向任何实现了 OpenAI `/chat/completions` 与 `/embeddings` 形状的服务
-（自建网关、企业内网模型）。它的正确性是**用本地假服务验证的**，没有连接任何真实云端。
+`openai_compatible` 是一个**通道**而不是单一厂商：DeepSeek、OpenAI、Claude、
+自建网关都能走它，只需改 `base_url` 与模型名。它的正确性是**用本地假服务验证的**，
+没有连接任何真实云端。
+
+**加一个新厂商** = 在 `capabilities/ai/providers/` 加一个模块 + 登记一行；
+内核其他地方与**所有插件**都不需要动。
 
 ### 配置
 
@@ -401,6 +407,8 @@ ctx.ai.text_generate("你好", provider="openai_compatible")   # 也可以按调
 {
   "ai": {
     "provider": "ollama",
+    "model": "",
+    "embedding_model": "",
     "ollama": {
       "url": "http://127.0.0.1:11434",
       "model": "qwen2.5vl:3b",
@@ -418,9 +426,16 @@ ctx.ai.text_generate("你好", provider="openai_compatible")   # 也可以按调
 }
 ```
 
+**模型名解析顺序**：`ai.model` → `ai.<provider>.model` → Provider 内置默认。
+全局项优先 —— `ai.model` 才是用户直接操作的旋钮。
+
+几条实际踩过的坑：
+
 - **地址写 `127.0.0.1` 而不是 `localhost`**：Windows 上 `localhost` 会先试 IPv6 `::1`，
   失败后回退 IPv4，每次探测白等约 2 秒（本机实测 2.07s vs 0.004s）。
 - **API Key 放 `secrets.json`**，配置里只放键名。密钥不进日志、不进错误信息。
+- **本地服务绕过系统代理**：装了 Clash 类代理时，连 `127.0.0.1` 的请求会绕到代理上；
+  能力层对回环地址显式绕过，远端仍走系统代理。
 - 向量模型需要先 `ollama pull nomic-embed-text`；没拉时错误信息会直接告诉你这条命令。
 
 ### 状态查询默认不联网

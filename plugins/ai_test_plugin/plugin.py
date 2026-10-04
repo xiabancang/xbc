@@ -1,4 +1,4 @@
-"""AI 能力探针：TASK-007 的验收插件。
+"""AI 能力测试插件：TASK-007 的验收插件。
 
 ## 它证明什么
 
@@ -8,12 +8,16 @@
 - 不知道 Provider 叫什么、模型叫什么、跑在哪个端口
 - 只调用 `ctx.ai.text_generate` / `vision_analyze` / `embedding`
 
-所以「**替换模型 Provider，不修改插件代码**」不是承诺，而是这个文件的直接结果：
-把配置里的 `ai.provider` 从 `ollama` 换成 `openai_compatible`，
-本文件一个字节都不需要改。
+所以验收标准 2「**切换 Provider 无需修改插件代码**」不是承诺，
+而是这个文件的直接结果：把配置里的 `ai.provider` 从 `ollama` 换成
+`openai_compatible`（或任何新登记的 Provider），本文件一个字节都不需要改。
 
-有测试专门守着这条线：`tests/test_ai_capability.py` 里有一条会扫描
-所有插件的源码，发现直接调用模型/HTTP 就失败。
+验收标准 5「**插件代码不存在直接模型调用**」由
+`tests/test_ai_capability.py::NoDirectModelAccessTests` 用 `ast` 扫描守着 ——
+出现模型 SDK 或 HTTP 客户端就失败。
+
+验收标准 3「**Ollama 不可用时有明确错误**」由能力层抛出的 `AIUnavailable` 保证，
+里面有服务地址、排查建议与替代方案，插件侧不需要写任何兜底逻辑。
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from typing import Any
 from xbc.core.contract.plugin import XbcPlugin
 
 
-class AIProbePlugin(XbcPlugin):
+class AITestPlugin(XbcPlugin):
     """只通过 AI 能力层说话的插件。"""
 
     def __init__(self) -> None:
@@ -60,16 +64,6 @@ class AIProbePlugin(XbcPlugin):
             risk="read",
         )
 
-        text_schema = {
-            "type": "object",
-            "properties": {
-                "prompt": {"type": "string", "minLength": 1},
-                "system": {"type": "string"},
-                "json_mode": {"type": "boolean"},
-                "provider": {"type": "string"},
-            },
-            "required": ["prompt"],
-        }
         text_output = {
             "type": "object",
             "required": ["text", "provider", "model"],
@@ -84,7 +78,18 @@ class AIProbePlugin(XbcPlugin):
         ctx.tools.register(
             "ai_text", self.ai_text,
             description="调用 AI 能力层的文本生成（text_generate）",
-            input_schema=text_schema, output_schema=text_output, risk="read",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "minLength": 1},
+                    "system": {"type": "string"},
+                    "json_mode": {"type": "boolean"},
+                    "provider": {"type": "string"},
+                },
+                "required": ["prompt"],
+            },
+            output_schema=text_output,
+            risk="read",
         )
         ctx.tools.register(
             "ai_vision", self.ai_vision,
@@ -127,7 +132,7 @@ class AIProbePlugin(XbcPlugin):
             risk="read",
         )
 
-        self.log.info("apply：AI 探针就绪，配置 = %s", self._cfg)
+        self.log.info("apply：AI 测试插件就绪，配置 = %s", self._cfg)
 
     # ---------------- 工具 ----------------
     def ai_status(self, probe: bool = False) -> dict[str, Any]:

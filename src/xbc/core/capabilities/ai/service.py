@@ -21,12 +21,21 @@ vectors = ctx.ai.embedding(["第一段", "第二段"])
 
 `provider=None` 时按**能力**挑：先看默认 Provider 支不支持，不支持就找其他注册了的。
 如果一个都没有，抛 `AIUnsupported` 并列出**谁支持这个能力** —— 而不是等网络请求失败。
+
+## 装配
+
+`build_ai_service()` 遍历**注册表**里的工厂（`registry.py`），
+每个工厂自己决定"这轮要不要出现"。所以增加厂商是加一个工厂 + 登记一行，
+内核其他地方与插件都不需要动。
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
+from . import providers as _builtin_providers  # noqa: F401 - 导入即完成内置 Provider 登记
+from .registry import ProviderSettings, provider_factories
+from .request import EmbeddingRequest, TextRequest, VisionRequest
 from .types import (
     AICapability,
     AIError,
@@ -92,7 +101,6 @@ class AIService:
             raise AIUnsupported(
                 f"没有 Provider 支持 {capability}；已注册: {self.providers()}"
             )
-        # 优先用默认 Provider（如果它支持）
         if self._default in candidates:
             return self._providers[self._default]
         return self._providers[candidates[0]]
@@ -155,12 +163,14 @@ class AIService:
         """文本生成。"""
         chosen = self.provider(provider, capability=AICapability.TEXT)
         return chosen.text_generate(
-            prompt,
-            system=system,
-            model=model,
-            json_mode=json_mode,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            TextRequest(
+                prompt=prompt,
+                system=system,
+                model=model,
+                json_mode=json_mode,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         )
 
     def vision_analyze(
@@ -185,13 +195,15 @@ class AIService:
         """
         chosen = self.provider(provider, capability=AICapability.VISION)
         return chosen.vision_analyze(
-            prompt,
-            images,
-            system=system,
-            model=model,
-            json_mode=json_mode,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            VisionRequest(
+                prompt=prompt,
+                system=system,
+                model=model,
+                json_mode=json_mode,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                images=list(images),
+            )
         )
 
     def embedding(
@@ -204,7 +216,7 @@ class AIService:
         """向量化。传单个字符串也可以。"""
         items = [texts] if isinstance(texts, str) else list(texts)
         chosen = self.provider(provider, capability=AICapability.EMBEDDING)
-        return chosen.embedding(items, model=model)
+        return chosen.embedding(EmbeddingRequest(texts=items, model=model))
 
     # ---------------- 兼容旧接口 ----------------
     def generate(
@@ -237,65 +249,42 @@ class AIService:
 
 
 def build_ai_service(config: Any, logger: Any = None, secrets: Any = None) -> AIService:
-    """按配置装配 AI 服务。内核里**唯一**知道"有哪些 Provider 实现"的地方。
+    """按配置装配 AI 服务。
 
-    - Ollama 始终注册（本地优先，开箱即用）；
-    - OpenAI 兼容 Provider **只在配置了 base_url 时注册** ——
-      "预留接口"不该影响默认体验；
-    - 密钥从 `secrets`（secrets.json）读取，不落进配置、不进日志。
+    遍历注册表里的工厂：每个工厂拿到自己的配置段与全局模型名，
+    自己决定"这轮要不要出现"（返回 None 就是跳过）。
+
+    加一个厂商 = 加一个工厂 + 登记一行；**本函数不需要改**。
     """
     service = AIService(logger=logger)
     provider_name = str(config.get("ai.provider", "ollama") or "ollama")
+    global_model = str(config.get("ai.model", "") or "")
+    global_embedding_model = str(config.get("ai.embedding_model", "") or "")
 
-    ollama_cfg = config.get("ai.ollama", {}) or {}
-    service.register(
-        _build_ollama_provider(ollama_cfg, logger),
-        default=(provider_name == "ollama"),
-    )
-
-    api_cfg = config.get("ai.openai_compatible", {}) or {}
-    base_url_value = str(api_cfg.get("base_url", "") or "").strip()
-    if base_url_value:
-        secret_name = str(api_cfg.get("api_key_secret", "") or "")
-        api_key = ""
-        if secrets is not None and secret_name:
-            api_key = secrets.get_secret(secret_name) or ""
-        service.register(
-            _build_openai_provider(api_cfg, api_key, logger),
-            default=(provider_name == "openai_compatible"),
+    for name, factory in provider_factories().items():
+        settings = ProviderSettings(
+            name=name,
+            options=dict(config.get(f"ai.{name}", {}) or {}),
+            global_model=global_model,
+            global_embedding_model=global_embedding_model,
+            secrets=secrets,
+            logger=logger,
         )
-    elif provider_name == "openai_compatible" and logger is not None:
+        try:
+            provider = factory(settings)
+        except Exception as exc:  # noqa: BLE001 - 一个 Provider 装配失败不该拖垮内核
+            if logger is not None:
+                logger.error("Provider %s 装配失败，已跳过：%s", name, exc)
+            continue
+        if provider is None:
+            continue
+        service.register(provider, default=(name == provider_name))
+
+    if provider_name and provider_name not in service.providers() and logger is not None:
         logger.warning(
-            "ai.provider 指定了 openai_compatible，但没有配置 "
-            "ai.openai_compatible.base_url，已回退到其他 Provider"
+            "ai.provider 指定了 %r，但它没有注册成功（多半是没配置齐全）；"
+            "当前可用：%s",
+            provider_name, service.providers() or "（无）",
         )
 
     return service
-
-
-# 下面两个工厂放在这里而不是各自的 provider 模块，是为了让 provider 模块
-# 只依赖 types/provider，不反向依赖内核的配置结构
-def _build_ollama_provider(cfg: dict, logger: Any) -> Any:
-    from .ollama import OllamaProvider
-
-    return OllamaProvider(
-        url=str(cfg.get("url", "http://localhost:11434") or "http://localhost:11434"),
-        model=str(cfg.get("model", "") or ""),
-        embedding_model=str(cfg.get("embedding_model", "") or ""),
-        timeout=int(cfg.get("timeout", 180) or 180),
-        options=dict(cfg.get("options") or {}),
-        logger=logger,
-    )
-
-
-def _build_openai_provider(cfg: dict, api_key: str, logger: Any) -> Any:
-    from .openai_compat import OpenAICompatibleProvider
-
-    return OpenAICompatibleProvider(
-        base_url_value=str(cfg.get("base_url", "") or ""),
-        model=str(cfg.get("model", "") or ""),
-        embedding_model=str(cfg.get("embedding_model", "") or ""),
-        api_key=api_key,
-        timeout=int(cfg.get("timeout", 120) or 120),
-        logger=logger,
-    )

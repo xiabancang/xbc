@@ -22,10 +22,12 @@ from .ai import (
     AIUnavailable,
     AIUnsupported,
     EmbeddingResult,
+    ModelProvider,
     OllamaProvider,
     OpenAICompatibleProvider,
     TextResult,
     build_ai_service,
+    register_provider_factory,
 )
 from .events import EventBus
 from .ffmpeg import FFmpegService
@@ -44,10 +46,12 @@ __all__ = [
     "EventBus",
     "FFmpegService",
     "FileService",
+    "ModelProvider",
     "OllamaProvider",
     "OpenAICompatibleProvider",
     "SettingsCapability",
     "TextResult",
     "build_ai_service",
     "mask_secret",
+    "register_provider_factory",
 ]

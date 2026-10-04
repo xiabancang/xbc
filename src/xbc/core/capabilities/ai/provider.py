@@ -1,17 +1,19 @@
-"""模型 Provider 抽象（TASK-007 第 2 项）。
+"""模型 Provider 抽象。
 
-插件只依赖 `AIService`（见 service.py），**永远不直接依赖 Provider**。
+插件只依赖 `AIService`，**永远不直接依赖 Provider**。
 Provider 是内核的装配细节：换一个实现，插件一行都不用改。
 
-Provider 需要声明自己支持哪些能力（`capabilities`），
-`AIService` 据此做路由 —— 这样"某个 Provider 不支持 embedding"不会等到调用时才炸，
-选 Provider 的那一刻就能给出清楚的理由。
+Provider 声明自己支持哪些能力（`capabilities`），`AIService` 据此路由 ——
+"某个 Provider 不支持 embedding"不会等到调用时才炸，选 Provider 的那一刻就能说清理由。
 
-这里同时提供两个共用工具：
+三类方法接收**请求对象**（`TextRequest` / `VisionRequest` / `EmbeddingRequest`），
+返回**结果对象**（`TextResult` / `EmbeddingResult`）。
 
-- `encode_image()`：把图片路径或字节转成 base64（视觉能力的共同前置）
-- `post_json()` / `get_json()`：统一的 HTTP 调用与错误翻译，
-  让每个 Provider 不必各写一遍超时、错误码、非 JSON 响应的处理
+这里同时提供几个共用工具：
+
+- `encode_image()` / `image_data_url()`：图片编码（视觉能力的共同前置）
+- `request_json()`：统一的 HTTP 调用与错误翻译，让每个 Provider 不必各写一遍
+  超时、错误码、非 JSON 响应的处理
 """
 
 from __future__ import annotations
@@ -19,22 +21,24 @@ from __future__ import annotations
 import base64
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from .request import EmbeddingRequest, TextRequest, VisionRequest
 from .types import (
+    AICapability,
+    AIResponseError,
     AIUnavailable,
     AIUnsupported,
-    AIResponseError,
-    AICapability,
     EmbeddingResult,
     TextResult,
 )
 
 
-class AIProvider(ABC):
+class ModelProvider(ABC):
     """模型 Provider 基类。
 
     子类必须给出 `name` 与 `capabilities`，并实现 `available()`；
@@ -64,32 +68,13 @@ class AIProvider(ABC):
         """该能力默认用哪个模型。"""
         return ""
 
-    def text_generate(
-        self,
-        prompt: str,
-        *,
-        system: str | None = None,
-        model: str | None = None,
-        json_mode: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> TextResult:
+    def text_generate(self, request: TextRequest) -> TextResult:
         raise AIUnsupported(f"Provider {self.name!r} 不支持文本生成（text_generate）")
 
-    def vision_analyze(
-        self,
-        prompt: str,
-        images: list[Any],
-        *,
-        system: str | None = None,
-        model: str | None = None,
-        json_mode: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> TextResult:
+    def vision_analyze(self, request: VisionRequest) -> TextResult:
         raise AIUnsupported(f"Provider {self.name!r} 不支持视觉理解（vision_analyze）")
 
-    def embedding(self, texts: list[str], *, model: str | None = None) -> EmbeddingResult:
+    def embedding(self, request: EmbeddingRequest) -> EmbeddingResult:
         raise AIUnsupported(f"Provider {self.name!r} 不支持向量化（embedding）")
 
     # ---------- 公共 ----------
@@ -116,14 +101,18 @@ class AIProvider(ABC):
         return data
 
     def __repr__(self) -> str:  # pragma: no cover - 调试用
-        return f"<AIProvider {self.name} capabilities={sorted(str(c) for c in self.capabilities)}>"
+        return f"<ModelProvider {self.name} capabilities={sorted(str(c) for c in self.capabilities)}>"
+
+
+#: 兼容旧名字。新代码请用 `ModelProvider`。
+AIProvider = ModelProvider
 
 
 # ---------------- 共用工具 ----------------
 
 
 def encode_image(source: Any) -> str:
-    """把图片（路径 / bytes）转成 base64 字符串；WebP/JPEG/PNG 都按原始字节处理。"""
+    """把图片（路径 / bytes）转成 base64 字符串。"""
     if isinstance(source, (bytes, bytearray)):
         return base64.b64encode(bytes(source)).decode("ascii")
     path = Path(str(source))
@@ -172,6 +161,24 @@ def _decode(response: Any) -> dict[str, Any]:
     return data
 
 
+#: 本地地址绝不走系统代理
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0", "[::1]"}
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_SYSTEM_OPENER = urllib.request.build_opener()
+
+
+def opener_for(url: str) -> Any:
+    """按地址挑选 opener：**本地服务绕过系统代理**。
+
+    Windows 上装了代理（Clash / 公司网关）时，`getproxies()` 会返回系统代理，
+    而它未必把 `127.0.0.1` 放进 no_proxy —— 结果"连本地模型"的请求会绕到代理上，
+    轻则变慢、重则直接失败。对一个**本地优先**的产品这是致命的，
+    所以这里对回环地址显式绕过。
+    """
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return _DIRECT_OPENER if host in _LOOPBACK_HOSTS else _SYSTEM_OPENER
+
+
 def request_json(
     url: str,
     *,
@@ -187,7 +194,7 @@ def request_json(
         headers={"Content-Type": "application/json", **(headers or {})},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener_for(url).open(request, timeout=timeout) as response:
             return _decode(response)
     except urllib.error.HTTPError as exc:
         detail = ""
@@ -209,9 +216,14 @@ def get_json(url: str, *, timeout: int = 5) -> dict[str, Any]:
 
 
 def probe_available(url: str, timeout: int = 2) -> bool:
-    """探测服务是否在跑。**任何失败都返回 False，不抛异常**（可用性探测不该炸）。"""
+    """探测服务是否在跑。**任何失败都返回 False，不抛异常**（可用性探测不该炸）。
+
+    注意：在部分机器上，连一个**没人监听**的端口不会立刻被拒绝，而是挂到超时
+    （本机实测 2.0s）。所以调用方不要把它放进每次请求的必经路径 ——
+    真正的失败由 `request_json` 直接给出，更准也更快。
+    """
     try:
-        urllib.request.urlopen(urllib.request.Request(url), timeout=timeout).close()
+        opener_for(url).open(urllib.request.Request(url), timeout=timeout).close()
         return True
     except Exception:  # noqa: BLE001 - 探测失败就是不可用
         return False
@@ -219,10 +231,12 @@ def probe_available(url: str, timeout: int = 2) -> bool:
 
 __all__ = [
     "AIProvider",
+    "ModelProvider",
     "base_url",
     "encode_image",
     "get_json",
     "image_data_url",
+    "opener_for",
     "probe_available",
     "request_json",
 ]

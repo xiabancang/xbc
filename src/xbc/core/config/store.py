@@ -28,6 +28,11 @@ DEFAULTS: dict[str, Any] = {
     "ai": {
         # 默认用哪个 Provider
         "provider": "ollama",
+        # 全局模型名：用户直接操作的旋钮。
+        # 优先于各 Provider 段里的 model —— 否则用户在 ai.model 里选了模型，
+        # 却会被 ai.ollama.model 的内置默认值悄悄盖掉。留空则用 Provider 自己的设置。
+        "model": "",
+        "embedding_model": "",
         "ollama": {
             # 用 127.0.0.1 而不是 localhost：Windows 上 localhost 会先试 IPv6 ::1，
             # 失败后回退 IPv4，每次探测白等约 2 秒（实测）。

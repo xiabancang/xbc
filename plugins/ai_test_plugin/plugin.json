@@ -1,10 +1,10 @@
 {
-  "id": "ai_probe",
-  "name": "AI 能力探针",
+  "id": "ai_test_plugin",
+  "name": "AI 能力测试插件",
   "version": "0.1.0",
   "spec_version": "1.0",
   "api_version": "1.0",
-  "entry": "plugin.py:AIProbePlugin",
+  "entry": "plugin.py:AITestPlugin",
   "description": "验证 AI 能力层：只通过 ctx.ai 调用模型，不接触任何模型 SDK、不发任何 HTTP。",
   "author": "夏半仓",
   "capabilities": ["ai", "files", "settings"],

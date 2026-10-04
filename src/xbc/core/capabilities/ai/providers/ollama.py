@@ -1,4 +1,4 @@
-"""Ollama 本地模型 Provider（TASK-007 第 3 项）。
+"""Ollama 本地模型 Provider。
 
 对接 Ollama 的 HTTP API：
 
@@ -17,15 +17,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from .provider import (
-    AIProvider,
+from ..provider import (
+    ModelProvider,
     base_url,
     encode_image,
     get_json,
     probe_available,
     request_json,
 )
-from .types import (
+from ..request import EmbeddingRequest, TextRequest, VisionRequest
+from ..types import (
     AICapability,
     AIResponseError,
     AIUnavailable,
@@ -34,7 +35,7 @@ from .types import (
 )
 
 
-class OllamaProvider(AIProvider):
+class OllamaProvider(ModelProvider):
     name = "ollama"
     capabilities = frozenset({AICapability.TEXT, AICapability.VISION, AICapability.EMBEDDING})
 
@@ -90,49 +91,57 @@ class OllamaProvider(AIProvider):
     def default_model(self, capability: AICapability) -> str:
         return self.embedding_model if capability is AICapability.EMBEDDING else self.model
 
+    # ---------- 调用 ----------
+    def _unavailable_hint(self, detail: str) -> str:
+        return (
+            f"{detail}\n"
+            f"本地 Ollama 不可用（{self.base}）。请确认 Ollama 已启动（`ollama serve`），"
+            "或把 ai.provider 改成别的 Provider、把 ai.ollama.url 指向正确的地址。"
+        )
+
+    def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """统一的出站调用，把"连不上"翻译成带排查建议的错误。
+
+        **不做事前探测**：早先每次生成前都会先 `available()` 探一次，那是白多一个往返；
+        而且本机实测"连没人监听的端口"不会立刻被拒、而是挂满超时（2s），
+        代价直接加到每次调用上。服务没起时，下面的 HTTP 调用本来就会立刻给出答案。
+        """
+        try:
+            return request_json(url, payload=payload, timeout=self.timeout)
+        except AIUnavailable as exc:
+            raise AIUnavailable(self._unavailable_hint(str(exc))) from exc
+
     # ---------- 文本 / 视觉 ----------
-    def _generate(
-        self,
-        prompt: str,
-        images: list[Any] | None,
-        *,
-        system: str | None,
-        model: str | None,
-        json_mode: bool,
-        temperature: float | None,
-        max_tokens: int | None,
-    ) -> TextResult:
-        chosen = model or self.model
+    def _generate(self, request: TextRequest, images: list[Any] | None) -> TextResult:
+        chosen = request.model or self.model
         if not chosen:
-            raise AIUnavailable("没有配置 Ollama 模型名（ai.ollama.model）")
+            raise AIUnavailable(
+                "没有配置 Ollama 模型名：请在配置里设置 ai.model，"
+                "或 ai.ollama.model\n"
+                f"服务地址：{self.base}"
+            )
 
         payload: dict[str, Any] = {
             "model": chosen,
-            "prompt": prompt,
+            "prompt": request.prompt,
             "stream": False,
         }
-        if system:
-            payload["system"] = system
+        if request.system:
+            payload["system"] = request.system
         if images:
             payload["images"] = [encode_image(image) for image in images]
-        if json_mode:
+        if request.json_mode:
             payload["format"] = "json"
 
         options = dict(self.options)
-        if temperature is not None:
-            options["temperature"] = temperature
-        if max_tokens is not None:
-            options["num_predict"] = max_tokens
+        if request.temperature is not None:
+            options["temperature"] = request.temperature
+        if request.max_tokens is not None:
+            options["num_predict"] = request.max_tokens
         if options:
             payload["options"] = options
 
-        if not self.available():
-            raise AIUnavailable(
-                f"本地模型服务不可用：{self._tags_url} 连不上。"
-                "请确认 Ollama 已启动，或改用其他 ai.provider"
-            )
-
-        data = request_json(self._generate_url, payload=payload, timeout=self.timeout)
+        data = self._post(self._generate_url, payload)
         text = data.get("response")
         if not isinstance(text, str):
             raise AIResponseError(f"Ollama 响应里没有 response 字段：{str(data)[:200]}")
@@ -147,60 +156,29 @@ class OllamaProvider(AIProvider):
             },
         )
 
-    def text_generate(
-        self,
-        prompt: str,
-        *,
-        system: str | None = None,
-        model: str | None = None,
-        json_mode: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> TextResult:
-        return self._generate(
-            prompt, None,
-            system=system, model=model, json_mode=json_mode,
-            temperature=temperature, max_tokens=max_tokens,
-        )
+    def text_generate(self, request: TextRequest) -> TextResult:
+        return self._generate(request, None)
 
-    def vision_analyze(
-        self,
-        prompt: str,
-        images: list[Any],
-        *,
-        system: str | None = None,
-        model: str | None = None,
-        json_mode: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> TextResult:
-        if not images:
+    def vision_analyze(self, request: VisionRequest) -> TextResult:
+        if not request.images:
             raise AIResponseError("vision_analyze 至少需要一张图片")
-        return self._generate(
-            prompt, list(images),
-            system=system, model=model, json_mode=json_mode,
-            temperature=temperature, max_tokens=max_tokens,
-        )
+        return self._generate(request, list(request.images))
 
     # ---------- 向量化 ----------
-    def embedding(self, texts: list[str], *, model: str | None = None) -> EmbeddingResult:
-        items = [str(t) for t in texts]
+    def embedding(self, request: EmbeddingRequest) -> EmbeddingResult:
+        items = [str(text) for text in request.texts]
         if not items:
-            return EmbeddingResult(vectors=[], provider=self.name, model=model or self.embedding_model)
+            return EmbeddingResult(vectors=[], provider=self.name, model=request.model or self.embedding_model)
 
-        chosen = model or self.embedding_model
+        chosen = request.model or self.embedding_model
         if not chosen:
             raise AIUnavailable(
-                "没有配置 Ollama 向量模型名（ai.ollama.embedding_model）"
-                "，例如 `ollama pull nomic-embed-text`"
+                "没有配置 Ollama 向量模型名：请在配置里设置 ai.embedding_model，"
+                "或 ai.ollama.embedding_model（例如 nomic-embed-text）"
             )
 
         try:
-            data = request_json(
-                self._embed_url,
-                payload={"model": chosen, "input": items},
-                timeout=self.timeout,
-            )
+            data = self._post(self._embed_url, {"model": chosen, "input": items})
             vectors = data.get("embeddings")
         except AIResponseError as exc:
             # "模型不存在"和"接口不存在"都是 404，但处理方式完全不同：
@@ -217,7 +195,7 @@ class OllamaProvider(AIProvider):
 
         if not isinstance(vectors, list) or len(vectors) != len(items):
             raise AIResponseError(
-                f"Ollama 返回的向量数量与输入不一致（期望 {len(items)}，得到 {vectors!r:.80}）"
+                f"Ollama 返回的向量数量与输入不一致（期望 {len(items)}，得到 {str(vectors)[:80]}）"
             )
         return EmbeddingResult(
             vectors=[list(map(float, vector)) for vector in vectors],
@@ -226,11 +204,7 @@ class OllamaProvider(AIProvider):
         )
 
     def _legacy_embed(self, text: str, model: str) -> list[float]:
-        data = request_json(
-            self._legacy_embed_url,
-            payload={"model": model, "prompt": text},
-            timeout=self.timeout,
-        )
+        data = self._post(self._legacy_embed_url, {"model": model, "prompt": text})
         vector = data.get("embedding")
         if not isinstance(vector, list):
             raise AIResponseError("旧向量接口响应里没有 embedding 字段")
