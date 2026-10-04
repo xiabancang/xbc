@@ -56,7 +56,7 @@ XBC/
 │  ├─ hello_xbc/             机制验证插件
 │  ├─ text_toolbox/          真实业务插件：纯本地文本处理
 │  └─ video_analyzer/        真实业务插件：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取
-├─ tests/                    280 项测试
+├─ tests/                    283 项测试
 └─ docs/                     技术方案、测试报告、调研报告
 ```
 
@@ -105,7 +105,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 280 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 283 tests / OK
 ```
 
 ---

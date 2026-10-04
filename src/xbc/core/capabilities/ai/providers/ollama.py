@@ -95,11 +95,13 @@ class OllamaProvider(ModelProvider):
         if model:
             return model
         key = "ai.embedding_model" if embedding else "ai.model"
+        # 示例值按能力区分：把对话模型的示例给向量模型用，会让人照做之后继续失败。
+        example = '"embedding_model": "<向量模型名>"' if embedding else '"model": "<模型名>"'
         raise AIUnavailable(
             f"provider={self.name} 缺少模型配置\n"
             f"原因：{key} 未设置，无法确定要调用哪个模型\n"
-            f"检查建议：在 config.json 里设置 {key}（例如 \"model\": \"qwen2.5vl:3b\"），"
-            "并用 `ollama list` 确认该模型已下载。"
+            f"检查建议：在 config.json 里设置 {key}（例如 {example}），"
+            "并用 `ollama list` 查看本地已下载的模型。"
         )
 
     # ---------- 可用性 ----------

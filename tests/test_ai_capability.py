@@ -655,6 +655,27 @@ class ProviderErrorTests(unittest.TestCase):
             provider.embedding(EmbeddingRequest(texts=["x"]))
         self.assertIn("ai.embedding_model", str(ctx.exception))
 
+    def test_embedding_advice_does_not_suggest_a_chat_model(self) -> None:
+        """检查建议里的示例必须与配置项匹配。
+
+        曾经的真实缺陷：`ai.embedding_model` 的建议里给的是 `"model": "qwen2.5vl:3b"`
+        —— 照做会把对话/视觉模型设成向量模型，然后继续失败。
+        """
+        provider = self.dead(embedding_model="")
+        with self.assertRaises(AIUnavailable) as ctx:
+            provider.embedding(EmbeddingRequest(texts=["x"]))
+        message = str(ctx.exception)
+        self.assertIn("embedding_model", message)
+        self.assertNotIn('"model":', message, "向量模型的建议里不该出现对话模型的示例")
+
+    def test_text_advice_names_the_text_key(self) -> None:
+        provider = self.dead(model="")
+        with self.assertRaises(AIUnavailable) as ctx:
+            provider.text_generate(TextRequest(prompt="x"))
+        message = str(ctx.exception)
+        self.assertIn("ai.model", message)
+        self.assertNotIn("embedding_model", message, "文本模型的建议里不该混入向量模型的键")
+
     def test_available_returns_false_instead_of_raising(self) -> None:
         """可用性探测绝不抛异常 —— 否则诊断会因为服务没起就崩掉。"""
         self.assertFalse(self.dead().available())
@@ -872,6 +893,24 @@ class AITestPluginTests(unittest.TestCase):
         message = steps["text_generate"]["error"]
         self.assertIn("provider=ollama", message)
         self.assertIn("检查建议：", message)
+
+    def test_successful_steps_are_printed(self) -> None:
+        """任务书第 5 节要求"打印结果" —— 成功的步骤也必须打印。
+
+        曾经的真实缺陷：只打印失败与汇总，三步全成功时控制台上看不到任何结果。
+        """
+        ctx = self.make_context()
+        image = Path(self.root) / "pic.png"
+        image.write_bytes(PNG_1PX)
+
+        with self.assertLogs("xbc.plugin.ai_test_plugin", level="INFO") as captured:
+            self.selftest(ctx, prompt="你好", images=[str(image)])
+
+        joined = "\n".join(record.getMessage() for record in captured.records)
+        for capability in ("text_generate", "vision_analyze", "embedding"):
+            self.assertIn(f"{capability} 成功", joined, f"{capability} 的结果没有被打印")
+        self.assertIn("dim=4", joined, "向量维度应出现在打印的结果里")
+        self.assertIn("labels=", joined, "标签应出现在打印的结果里")
 
     # ---------- 验收 2：切换 Provider 不改插件（全文件哈希）----------
     def plugin_files_hash(self) -> dict[str, str]:

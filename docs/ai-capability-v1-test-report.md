@@ -5,7 +5,7 @@
 | 任务 | TASK-007 夏半仓 AI Capability Layer V1 |
 | 版本 | `CORE_VERSION = 0.1.0`，`API_SPEC_VERSION = 1.0` |
 | 环境 | Windows · Python 3.13.15 · Ollama 0.35.1（本机 `qwen2.5vl:3b` / `nomic-embed-text`） |
-| 结论 | **8 项验收标准全部通过**；全量 **280** 项测试通过（系统 Python + venv 双环境） |
+| 结论 | **8 项验收标准全部通过**；全量 **283** 项测试通过（系统 Python + venv 双环境） |
 
 ---
 
@@ -100,6 +100,16 @@ tool ok = True   插件报告 provider = ollama   三步全成功 = True
 输入图片是 ffmpeg `testsrc` 生成的 320×240 测试图；`vision_analyze` 的描述与标签
 与实际画面相符。`text_generate` 的输出内容由模型自行生成，本报告不对其真实性作评价。
 
+**插件控制台实际打印**（任务书第 5 节要求"打印结果"）：
+
+```
+apply：AI 自检插件就绪
+text_generate 成功 → model=qwen2.5vl:3b usage={'prompt_tokens': 24, 'completion_tokens': 18} text=我是来自…
+vision_analyze 成功 → model=qwen2.5vl:3b description=这张图片是一个电视测试图，… labels=['电视测试图', …]
+embedding 成功 → model=nomic-embed-text count=2 dim=768
+自检完成：provider=ollama，成功 3/3
+```
+
 ### 验收 2 —— 切换 Provider 的全文件哈希对比
 
 两次运行使用**同一份插件、同一个工具、同一组参数**，只改配置里的 `ai.provider`：
@@ -142,9 +152,21 @@ provider=ollama 不可用
 ```
 provider=ollama 缺少模型配置
 原因：ai.model 未设置，无法确定要调用哪个模型
-检查建议：在 config.json 里设置 ai.model（例如 "model": "qwen2.5vl:3b"），
-          并用 `ollama list` 确认该模型已下载。
+检查建议：在 config.json 里设置 ai.model（例如 "model": "<模型名>"），
+          并用 `ollama list` 查看本地已下载的模型。
 ```
+
+**（b2）向量模型未配置**（`ai.embedding_model` 为空）：
+
+```
+provider=ollama 缺少模型配置
+原因：ai.embedding_model 未设置，无法确定要调用哪个模型
+检查建议：在 config.json 里设置 ai.embedding_model（例如 "embedding_model": "<向量模型名>"），
+          并用 `ollama list` 查看本地已下载的模型。
+```
+
+两个建议里的示例值**与各自的配置项匹配**：把对话模型的示例拿给向量模型用，
+会让人照做之后继续失败（见缺陷 B7）。
 
 **（c）Provider 未配置 / 名字写错**（由 `build_ai_service` 给出，不静默失败）：
 
@@ -225,11 +247,11 @@ provider=openai_compatible 配置不完整
 ### 验收 8 —— 全部测试通过
 
 ```
-系统 Python    Ran 280 tests in 14.450s | OK  exit=0
-venv           Ran 280 tests in 14.547s | OK  exit=0
+系统 Python    Ran 283 tests in 14.687s | OK  exit=0
+venv           Ran 283 tests in 14.907s | OK  exit=0
 ```
 
-全量测试 278 → **280**（本轮重写 `tests/test_ai_capability.py` 为 **77 项**）。
+全量测试 278 → **283**（`tests/test_ai_capability.py` 为 **80 项**）。
 
 ---
 
@@ -267,6 +289,13 @@ venv           Ran 280 tests in 14.547s | OK  exit=0
 | # | 缺陷 | 影响 | 修复 |
 |---|---|---|---|
 | B6 | `_embedding_step` 里为生成向量预览**重复调用了一次 embedding** | 每次自检白多一次向量化往返 | 改为在同一个结果上生成预览 |
+| B7 | `ai.embedding_model` 的检查建议里给的是**对话/视觉模型**的示例（`"model": "qwen2.5vl:3b"`） | 照建议做会把对话模型设成向量模型，然后**继续失败** —— 一条本意是"可操作"的错误信息反而误导人 | 示例值按能力区分：向量化给 `"embedding_model": "<向量模型名>"`；并把具体模型名换成占位符，Core 不再出现任何具体模型名 |
+| B8 | 插件只在**失败**和汇总时打印，三步全成功时控制台上看不到任何结果 | 任务书第 5 节要求"打印结果"，实际没做到 | 每个成功的步骤也打印一行结果摘要（模型名 / usage / 描述 / 标签 / 维度） |
+| B9 | 我在修 B7 时把 `_require_model` 里的 `raise` 写成了 `return`，`AIUnavailable` 被当成模型名返回 | 一旦触发就是 `TypeError: Object of type AIUnavailable is not JSON serializable`，模型未配置这条路径整体不可用 | 已改为 `raise`。**该缺陷在提交前被新增的 4 条测试捕获**（记录在此，因为它说明测试网确实起作用） |
+
+B7、B8 是重读任务书时发现的规格偏差，各自补了测试锁定：
+`test_embedding_advice_does_not_suggest_a_chat_model`、
+`test_text_advice_names_the_text_key`、`test_successful_steps_are_printed`。
 
 （前几轮修复的 B1–B5 —— `/v1` 被剥、`status()` 默认联网 4 秒、`localhost` 慢 2 秒、
 本地请求走系统代理、生成前多余预探测 —— 详见 §6，本轮未回归。）

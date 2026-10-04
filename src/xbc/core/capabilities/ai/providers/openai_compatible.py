@@ -85,10 +85,12 @@ class OpenAICompatibleProvider(ModelProvider):
         if model:
             return model
         key = "ai.embedding_model" if embedding else "ai.model"
+        example = '"embedding_model": "<向量模型名>"' if embedding else '"model": "<模型名>"'
         raise AIUnavailable(
             f"provider={self.name} 缺少模型配置\n"
             f"原因：{key} 未设置，无法确定要调用哪个模型\n"
-            f"检查建议：在 config.json 里设置 {key}，注意要写**该服务方**的模型名。"
+            f"检查建议：在 config.json 里设置 {key}（例如 {example}），"
+            "注意要写**该服务方**的模型名。"
         )
 
     # ---------- 可用性 ----------

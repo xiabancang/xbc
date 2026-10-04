@@ -340,7 +340,7 @@ FFmpeg 子进程、产出多个文件、返回嵌套结构化结果，并且停�
 | 5 | 插件无直接模型调用 | ✅ | 9 个插件源码：字面 grep 0 命中、`ast` 0 命中 |
 | 6 | Core 无业务耦合 | ✅ | 18 条业务词表（含词边界）扫描 `capabilities/ai/`：0 命中 |
 | 7 | 跨 Provider 约束写入文档与注释 | ✅ | `types.py` 模块文档 + 类注释 + README，三处均有测试断言 |
-| 8 | 全部测试通过 | ✅ | `Ran 280 tests ... OK`，双环境 |
+| 8 | 全部测试通过 | ✅ | `Ran 283 tests ... OK`，双环境 |
 
 **真实环境验证**（本机 Ollama，非 mock）：
 
@@ -368,7 +368,7 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 按调用的 `provider=` / `model=` / `temperature=` / `max_tokens=` / `json_mode=` 参数、
 旧版兼容方法 `generate()`。参数统一由 `ai.options` 提供，避免同一参数两个来源。
 
-**开发中发现并修复 6 个真缺陷**：
+**开发中发现并修复 9 个真缺陷**：
 
 1. **`base_url()` 把 OpenAI 的 `/v1` 后缀剥掉了** —— 请求打到 `/chat/completions` 上直接 404，
    `openai_compatible` 整条链路不可用。`/v1` 是基址惯例，不能动。已修 + 回归测试。
@@ -381,10 +381,16 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 5. **每次生成前都做一次可用性预探测** —— 白多一个往返；且本机"连没人监听的端口"不退化
    为拒绝而是挂满超时（2s），代价直接加到每次调用上。移除预探测。
 6. **自检插件里为生成向量预览重复调用了一次 embedding** —— 白多一次往返。改为复用同一结果。
+7. **`ai.embedding_model` 的检查建议给的是对话模型的示例** —— 照做会把对话模型设成向量模型、
+   然后继续失败。示例值改为按能力区分，并把具体模型名换成占位符。
+8. **插件只在失败时打印，三步全成功时控制台看不到结果** —— 任务书第 5 节要求「打印结果」。
+   改为每个成功步骤也打印一行结果摘要。
+9. **修第 7 项时我把 `raise` 写成了 `return`**，异常对象被当成模型名返回 —— 提交前被新增的
+   4 条测试捕获。记录在此，因为它说明测试网确实起作用。
 
 修完以上与测试自身的服务关闭轮询优化后，整套测试从 **37s → 14.5s**。
 
-**测试**：203 → **280 项**（`tests/test_ai_capability.py` **77 项**：接口契约、视觉结果解析、
+**测试**：203 → **283 项**（`tests/test_ai_capability.py` **80 项**：接口契约、视觉结果解析、
 两个 Provider 的协议级验证、插件端到端、Provider 全文件哈希对比、配置错误、
 代理绕过、跨 Provider 约束、业务词扫描、两条无直连证据）。
 
@@ -421,4 +427,4 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 | 2026-10-04 | TASK-005 | 第一个真实业务插件 video_analyzer：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取，4 个 Tool 均返回结构化 JSON；新增内核能力 probe_media；修 1 个配置重载 bug；测试增至 153 项 |
 | 2026-10-04 | 修复 | 重复扫描被误报为"插件 id 重复"错误（长驻界面每点一次刷新就刷一屏 ERROR） |
 | 2026-10-04 | TASK-006 | 插件产品化基础：`.xbcplugin` 包格式（含 zip-slip 防护）、安装/卸载/升级、SemVer 版本比较、安装台账、用户数据目录分离；修 3 个真缺陷（其中"升级不生效"直接卡验收）；测试增至 203 项 |
-| 2026-10-05 | TASK-007 | AI Capability Layer V1（按规格对齐版）：`AIService` + `ModelProvider` + Request/Response 结构；`providers/`（ollama / openai_compatible）；`text_generate` / `vision_analyze`（结构化 description+labels）/ `embedding`（dim）；配置 `ai.provider`/`ai.model`/`ai.options`；验收插件 `ai_test_plugin`（单工具 `ai_selftest`）；**删除 Provider 注册表**（原则 6）；修 6 个真缺陷；测试增至 280 项；产出《AI Capability Layer V1 测试报告》 |
+| 2026-10-05 | TASK-007 | AI Capability Layer V1（按规格对齐版）：`AIService` + `ModelProvider` + Request/Response 结构；`providers/`（ollama / openai_compatible）；`text_generate` / `vision_analyze`（结构化 description+labels）/ `embedding`（dim）；配置 `ai.provider`/`ai.model`/`ai.options`；验收插件 `ai_test_plugin`（单工具 `ai_selftest`）；**删除 Provider 注册表**（原则 6）；修 9 个真缺陷；测试增至 283 项；产出《AI Capability Layer V1 测试报告》 |

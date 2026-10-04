@@ -145,4 +145,28 @@ class AITestPlugin(XbcPlugin):
         except AIError as exc:
             self.log.error("%s 失败：%s", capability, exc)
             return {"capability": capability, "ok": False, "error": str(exc)}
+        # 成功的步骤也要打印结果 —— 否则"打印结果"这件事只剩失败时才会发生
+        self.log.info("%s 成功 → %s", capability, self._summarize(capability, result))
         return {"capability": capability, "ok": True, "result": result}
+
+    @staticmethod
+    def _summarize(capability: str, result: dict[str, Any]) -> str:
+        """把一步的结果压成一行，便于在控制台直接看。"""
+        if capability == "text_generate":
+            text = str(result.get("text", "")).replace("\n", " ")
+            return (
+                f"model={result.get('model')} "
+                f"usage={result.get('usage')} "
+                f"text={text[:80]}"
+            )
+        if capability == "vision_analyze":
+            description = str(result.get("description", "")).replace("\n", " ")
+            return (
+                f"model={result.get('model')} "
+                f"description={description[:80]} "
+                f"labels={result.get('labels')}"
+            )
+        return (
+            f"model={result.get('model')} "
+            f"count={result.get('count')} dim={result.get('dim')}"
+        )
