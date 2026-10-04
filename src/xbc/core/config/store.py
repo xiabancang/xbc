@@ -26,12 +26,26 @@ DEFAULTS: dict[str, Any] = {
         "ffprobe_path": "ffprobe",
     },
     "ai": {
+        # 默认用哪个 Provider
         "provider": "ollama",
         "ollama": {
-            "url": "http://localhost:11434/api/generate",
+            # 用 127.0.0.1 而不是 localhost：Windows 上 localhost 会先试 IPv6 ::1，
+            # 失败后回退 IPv4，每次探测白等约 2 秒（实测）。
+            "url": "http://127.0.0.1:11434",
             "model": "qwen2.5vl:3b",
+            "embedding_model": "nomic-embed-text",
             "timeout": 180,
+            # 以下组合来自 V18 原型的已验证参数
             "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 700},
+        },
+        # API 模型接口预留：base_url 为空时**不注册**，不影响本地开箱体验。
+        # 密钥放 secrets.json，这里只放它的键名。
+        "openai_compatible": {
+            "base_url": "",
+            "model": "",
+            "embedding_model": "",
+            "api_key_secret": "openai_compatible_api_key",
+            "timeout": 120,
         },
     },
     "plugins": {},

@@ -299,15 +299,74 @@ FFmpeg 子进程、产出多个文件、返回嵌套结构化结果，并且停�
 
 ---
 
+## TASK-007　AI Capability Layer V1 —— DONE
+
+**目的**：让所有插件通过统一接口调用 AI 能力。**要求**：AI 属于 Core Capability，
+**业务插件不得直接调用模型**。
+
+**实现 7 项（全部达成）**：
+
+| # | 要求 | 实现 |
+|---|---|---|
+| 1 | ai capability 接口设计 | `capabilities/ai/`：能力枚举 + 结构化结果 + 错误分类 |
+| 2 | 模型 Provider 抽象 | `AIProvider` 抽象基类，声明 `capabilities`，能力层据此路由 |
+| 3 | 支持 Ollama 本地模型 | `OllamaProvider`：文本 / 视觉 / 向量，含旧向量接口回退 |
+| 4 | 支持 API 模型接口预留 | `OpenAICompatibleProvider`，配置了 `base_url` 才注册 |
+| 5 | `text_generate` | 返回 `TextResult`（含 provider / model / usage） |
+| 6 | `vision_analyze` | 接受路径 / 字节，内核负责编码；视觉走多模态接口 |
+| 7 | `embedding` | 批量向量化，返回 `EmbeddingResult`（count / dimensions） |
+
+**禁止**：视频业务逻辑、Agent 系统、工作流系统、云端账号、商城 —— 全部未做。
+
+**验收对照**：
+
+| 验收标准 | 结果 | 证据 |
+|---|---|---|
+| 新增 AI 测试插件，调用 AI Capability 成功 | ✅ | `plugins/ai_probe/`；4 个工具全部通过能力层调用成功 |
+| **替换模型 Provider，不修改插件代码** | ✅ | 配置切到 `openai_compatible` + 进程内注入第三方 Provider，**插件源码哈希不变** |
+
+**真实环境验证**（本机 Ollama，非 mock）：
+
+```
+text_generate    provider=ollama model=qwen2.5vl:3b  → "镜头切分是指将一个视频片段按照内容或情感进行分割…"
+vision_analyze   provider=ollama model=qwen2.5vl:3b  → "这张图里有彩色条纹和一个黑色的方块。"（测试图描述正确）
+embedding        provider=ollama model=nomic-embed-text → 768 维；同文本同向量；语义相近相似度更高
+换 Provider      provider=echo（进程内注入）→ 插件代码哈希未变 ✅
+```
+
+**怎么保证"插件不得直接调模型"不是一句空话**：有一条测试用 `ast` 扫描所有
+`plugins/*/plugin.py`，出现 `requests` / `httpx` / `aiohttp` / `ollama` / `openai` /
+`urllib.request` / `http.client` 等即失败；另一条检查模型端点字符串只出现在
+`capabilities/ai/` 下。**约束写进测试才守得住。**
+
+**开发中发现并修复 2 个真缺陷**：
+
+1. **`base_url()` 把 OpenAI 的 `/v1` 后缀剥掉了** —— 于是请求打到 `/chat/completions` 上直接 404。
+   `/v1` 是 OpenAI 兼容服务的基址惯例，不能动。已修并加测试锁定。
+2. **`status()` 默认做网络探测，一次要 4 秒** —— 状态查询会被放在热路径上
+   （插件列表、界面刷新），这个代价不可接受。改为默认只报结构信息，需要真实可用性时
+   显式 `probe=True`。同时把默认地址从 `localhost` 改成 `127.0.0.1`
+   （Windows 上 `localhost` 先试 IPv6 再回退 IPv4，**实测每次探测 2.07s vs 0.004s**）。
+   修完后整套测试从 37s 回到 25s。
+
+**测试**：203 → **255 项**（新增 52 项：接口契约、两个 Provider 的协议级验证、
+插件端到端、Provider 替换、以及两条约束检查）。
+
+**测试方式说明**：Provider 的正确性用**本地假模型服务**验证（标准库 `http.server`，
+同时实现 Ollama 与 OpenAI 两套形状），**不依赖真 Ollama、不连任何云端**，
+因此可确定性复现。
+
+---
+
 ## 待办（尚未开始）
 
 | ID | 任务 | 前置 | 备注 |
 |---|---|---|---|
-| TASK-007 | 图形界面二期：插件安装/卸载入口 + 命令面板 + 配置编辑 | TASK-006 | 安装器已是纯数据操作，界面直接调 `create_installer()` |
-| TASK-008 | 在 video_analyzer 上增加 AI 理解（镜头级视觉理解） | TASK-005 | 会用到 `ai` 能力与 Ollama |
-| TASK-009 | 打包分发（PyInstaller） | TASK-008 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
-| TASK-010 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
-| TASK-011 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-009 | 插件包与台账已就位，商城可直接复用 |
+| TASK-008 | 在 video_analyzer 上增加 AI 理解（镜头级视觉理解） | TASK-005 / 007 | 合并两者的插件：FFmpeg 出关键帧 → `ctx.ai.vision_analyze` |
+| TASK-009 | 图形界面二期：插件安装/卸载入口 + 配置编辑 | TASK-006 | 安装器是纯数据操作，界面直接调 `create_installer()` |
+| TASK-010 | 打包分发（PyInstaller） | TASK-008 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
+| TASK-011 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
+| TASK-012 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-010 | 包格式、台账、AI 能力层均已就位 |
 
 ---
 
@@ -324,3 +383,4 @@ FFmpeg 子进程、产出多个文件、返回嵌套结构化结果，并且停�
 | 2026-10-04 | TASK-005 | 第一个真实业务插件 video_analyzer：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取，4 个 Tool 均返回结构化 JSON；新增内核能力 probe_media；修 1 个配置重载 bug；测试增至 153 项 |
 | 2026-10-04 | 修复 | 重复扫描被误报为"插件 id 重复"错误（长驻界面每点一次刷新就刷一屏 ERROR） |
 | 2026-10-04 | TASK-006 | 插件产品化基础：`.xbcplugin` 包格式（含 zip-slip 防护）、安装/卸载/升级、SemVer 版本比较、安装台账、用户数据目录分离；修 3 个真缺陷（其中"升级不生效"直接卡验收）；测试增至 203 项 |
+| 2026-10-04 | TASK-007 | AI Capability Layer V1：能力枚举与结构化结果、Provider 抽象、Ollama（文本/视觉/向量）、OpenAI 兼容预留、`ai_probe` 验收插件；修 2 个真缺陷（`/v1` 被剥、status 默认联网 4 秒）；测试增至 255 项 |

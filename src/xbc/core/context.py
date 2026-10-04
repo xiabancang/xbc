@@ -330,8 +330,9 @@ class AppContext:
             ffprobe_path=config.get("ffmpeg.ffprobe_path", "ffprobe"),
             logger=logger,
         )
-        ai = build_ai_service(config, logger)
+        # 先建 settings：AI 的 API Key 要从 secrets.json 取，不能进配置文件
         settings = SettingsCapability(config, paths.secrets_file, logger)
+        ai = build_ai_service(config, logger, secrets=settings)
         events = EventBus(logger)
 
         hooks = HookRelay(logger)

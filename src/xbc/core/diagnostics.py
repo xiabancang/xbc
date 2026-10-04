@@ -82,9 +82,21 @@ def check_ffmpeg(ctx: Any) -> dict[str, Any]:
 
 
 def check_ai(ctx: Any) -> dict[str, Any]:
-    """本地模型服务属于外部依赖，未启动是正常状态。"""
-    status = ctx.ai.status()
-    return _result(any(status.values()), OPTIONAL, providers=status)
+    """本地模型服务属于外部依赖，未启动是正常状态。
+
+    这里是少数**需要真实探测**的地方：体检命令偶尔跑一次，
+    就应该给出"现在到底能不能用"，而不是"配置上像是能用"。
+    """
+    status = ctx.ai.status(probe=True)
+    available = [name for name, info in status.items() if info.get("available")]
+    configured = [name for name, info in status.items() if info.get("configured")]
+    return _result(
+        bool(available),
+        OPTIONAL,
+        providers=status,
+        available_providers=available,
+        configured_providers=configured,
+    )
 
 
 def check_data_dir(ctx: Any) -> dict[str, Any]:
