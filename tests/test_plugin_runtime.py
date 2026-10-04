@@ -134,10 +134,15 @@ class _Base(unittest.TestCase):
 
 
 class LifecycleTests(_Base):
-    def test_builtin_plugins_discovered(self) -> None:
-        manager = self.manager()
-        ids = sorted(r.id for r in manager.records())
-        self.assertEqual(ids, ["hello_xbc", "text_toolbox"])
+    def test_every_builtin_plugin_dir_is_discovered(self) -> None:
+        """发现结果应等于内置插件目录的真实内容（不硬编码插件清单）。"""
+        expected = {
+            folder.name
+            for folder in BUILTIN_PLUGINS.iterdir()
+            if (folder / "plugin.json").is_file()
+        }
+        found = {r.id for r in self.manager().records()}
+        self.assertEqual(expected, found)
 
     def test_discover_does_not_import_code(self) -> None:
         """A1：清单里有名称，且**不导入插件代码、不实例化、不建作用域**。"""
@@ -157,11 +162,23 @@ class LifecycleTests(_Base):
         self.assertIn("text_stats", [t.name for t in toolbox.manifest.tools])
 
     def test_activate_registers_and_deactivate_releases(self) -> None:
-        """A5：注册即资源 —— 停用后注册全部清空，且没有残留。"""
+        """A5：注册即资源 —— 停用后注册全部清空，且没有残留。
+
+        这里断言的是**关系**（已注册数 == 清单声明数、停用后归零），
+        而不是硬编码插件数量 —— 否则每加一个插件这条测试都会假失败。
+        """
         manager = self.manager()
         manager.activate_all()
-        self.assertEqual(len(self.ctx.tool_registry), 7)
-        self.assertEqual(len(self.ctx.skill_catalog), 2)
+
+        registered = len(self.ctx.tool_registry)
+        declared = sum(
+            len(r.manifest.tools)
+            for r in manager.records()
+            if r.state is PluginState.ACTIVE
+        )
+        self.assertGreater(registered, 0)
+        self.assertEqual(registered, declared, "注册的工具数应与清单声明一致")
+        self.assertGreater(len(self.ctx.skill_catalog), 0)
 
         hello = manager.get("hello_xbc")
         self.assertIsNotNone(hello.scope)
@@ -178,9 +195,10 @@ class LifecycleTests(_Base):
     def test_reactivation_after_deactivate(self) -> None:
         manager = self.manager()
         manager.activate_all()
+        before = len(self.ctx.tool_registry)
         manager.deactivate_all()
         manager.activate_all()
-        self.assertEqual(len(self.ctx.tool_registry), 7)
+        self.assertEqual(len(self.ctx.tool_registry), before)
 
     def test_state_machine_and_unload(self) -> None:
         manager = self.manager()
@@ -786,9 +804,10 @@ class AcceptanceTests(_Base):
         manager = self.manager()
         manager.load_all()
         report = doctor(self.ctx, manager)
+        total = len(manager.records())
         self.assertTrue(report["runtime"]["ok"], report["runtime"]["problems"])
-        self.assertEqual(report["runtime"]["plugin_count"], 2)
-        self.assertEqual(report["runtime"]["states"].get("loaded"), 2)
+        self.assertEqual(report["runtime"]["plugin_count"], total)
+        self.assertEqual(report["runtime"]["states"].get("loaded"), total)
 
     def test_doctor_surfaces_failures(self) -> None:
         from xbc.core.diagnostics import doctor

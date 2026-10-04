@@ -201,15 +201,59 @@ D3 配置用 JSON 而非 YAML 是为守住"内核零第三方依赖"）。
 
 ---
 
+## TASK-005　第一个真实业务插件 video_analyzer —— DONE
+
+**目的**：验证 Plugin Runtime 能否承载**复杂业务能力** —— 一个工具内部要跑几十次
+FFmpeg 子进程、产出多个文件、返回嵌套结构化结果，并且停用时干净释放。
+
+**范围（实现 6 项，全部达成）**：
+
+| # | 要求 | 实现 |
+|---|---|---|
+| 1 | video_analyzer 插件 | `plugins/video_analyzer/`（清单 + 入口） |
+| 2 | 使用 FFmpeg 获取视频信息 | `video_probe` → ffprobe JSON（新增内核能力 `FFmpegService.probe_media`） |
+| 3 | 镜头切分 | `video_shots` → `select='gt(scene,T)',showinfo` + 解析 `pts_time` |
+| 4 | 抽取关键帧 | `video_extract_keyframes` → `-ss` 精确定位逐镜头抽帧 |
+| 5 | 注册 Tool | 4 个：`video_probe` / `video_split_shots` / `video_extract_keyframes` / `video_analyze` |
+| 6 | 返回结构化 JSON | 每个工具都声明 `output_schema`，输出受内核校验 |
+
+**禁止（6 项全部未做）**：AI 生成视频、Ollama、云服务、自动发布、UI 扩展、商业功能。
+插件只用 `files` / `ffmpeg` / `settings` 三个能力，**零第三方依赖**（有测试断言）。
+
+**验收对照**：
+
+| 验收标准 | 结果 | 证据 |
+|---|---|---|
+| 1. 插件独立安装 | ✅ | 复制到用户插件目录、**把内置目录指向空目录**后仍能发现并运行；测试 `test_standalone_install_into_user_plugin_dir` |
+| 2. Runtime 发现插件 | ✅ | `test_runtime_discovers_plugin`；未激活时不导入代码 |
+| 3. Tool 可调用 | ✅ | 4 个工具全部调用成功（CLI 与 Python API 双路径） |
+| 4. 输出结果正确 | ✅ | 用**带 2 个硬切的合成视频**断言：时长 6.0s、切点 2.0/4.0、3 个镜头、关键帧文件真实存在且是 JPEG |
+| 5. 禁用插件无残留 | ✅ | 停用后工具/技能/事件订阅全部为 0，作用域 `effect_count == 0` |
+| 6. 全量测试通过 | ✅ | **153 项**（新增 18 项），系统 Python 与 venv 双环境通过 |
+
+**测试视频**：运行时用 FFmpeg lavfi 合成（`testsrc` + `smptebars` + `testsrc2` 各 2 秒拼接），
+**不往仓库里塞二进制**；无 FFmpeg 时整体跳过。
+
+**开发中发现并修复 1 个真 bug**：重新激活插件时 `ctx.config` 与 `record.config_source`
+仍是上一次的旧值 —— 用户改了配置、重新启用却不生效。已修（激活时重新读取配置并同步
+`ctx.config`），并由 `test_threshold_from_config_changes_result` 锁定：
+把阈值调到 0.95 后切分结果从 3 个镜头变成 1 个，证明配置真的能影响业务结果。
+
+**顺带修正 5 条脆弱测试**：旧测试硬编码了"2 个插件 / 7 个工具"，新插件一加就假失败。
+已改为断言**关系**（发现结果 == 内置目录实际内容、注册数 == 清单声明数、停用后归零），
+这样以后加插件不会再触发假失败。
+
+---
+
 ## 待办（尚未开始）
 
 | ID | 任务 | 前置 | 备注 |
 |---|---|---|---|
-| TASK-005 | 图形界面二期：命令面板 / 配置编辑 / 技能正文预览 | TASK-004 | 命令面板消费 manifest 的 `commands` 索引 |
-| TASK-006 | 首个 AI 视频类插件（把 V18 能力插件化） | TASK-003 | V18 仅作功能参考，禁止直接修改；参考 `F:\Downloads\xbc-refs\PySceneDetect` |
-| TASK-007 | 打包分发（PyInstaller） | TASK-006 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
-| TASK-008 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
-| TASK-009 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-007 | 当前阶段明确不做 |
+| TASK-006 | 图形界面二期：命令面板 / 配置编辑 / 技能正文预览 | TASK-004 | 命令面板消费 manifest 的 `commands` 索引 |
+| TASK-007 | 在 video_analyzer 上增加 AI 理解（镜头级视觉理解） | TASK-005 | 会用到 `ai` 能力与 Ollama；V18 的 prompt 可作参考 |
+| TASK-008 | 打包分发（PyInstaller） | TASK-007 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
+| TASK-009 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
+| TASK-010 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-008 | 当前阶段明确不做 |
 
 ---
 
@@ -223,3 +267,4 @@ D3 配置用 JSON 而非 YAML 是为守住"内核零第三方依赖"）。
 | 2026-10-04 | TASK-002 | 产出《夏半仓 Plugin Runtime 技术方案 V1》（5 个参考实地调研） |
 | 2026-10-04 | TASK-003 | 实现 Plugin Runtime V1 MVP：分层注册表、作用域、工具/技能注册表、三层配置、CLI、真实插件；123 项测试通过 |
 | 2026-10-04 | TASK-004 | Desktop Shell MVP：插件列表/状态、启用停用、Tool/Skill 列表；界面不缓存状态，操作复用 Runtime 同一方法；测试增至 135 项 |
+| 2026-10-04 | TASK-005 | 第一个真实业务插件 video_analyzer：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取，4 个 Tool 均返回结构化 JSON；新增内核能力 probe_media；修 1 个配置重载 bug；测试增至 153 项 |

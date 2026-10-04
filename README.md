@@ -52,8 +52,9 @@ XBC/
 │  └─ ui/shell.py            桌面管理入口（插件列表/状态、启用停用、Tool/Skill 列表）
 ├─ plugins/                  内置插件
 │  ├─ hello_xbc/             机制验证插件
-│  └─ text_toolbox/          第一个真实业务插件（纯本地文本处理）
-├─ tests/                    123 项测试
+│  ├─ text_toolbox/          真实业务插件：纯本地文本处理
+│  └─ video_analyzer/        真实业务插件：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取
+├─ tests/                    153 项测试
 └─ docs/                     技术方案、测试报告、调研报告
 ```
 
@@ -259,6 +260,40 @@ python -m venv .venv
 ```
 
 用环境变量 `XBC_HOME` 可以把整个数据目录搬走（测试与便携版都靠它）。
+
+---
+
+## 内置插件
+
+| 插件 | 定位 | 工具 |
+|---|---|---|
+| `hello_xbc` | 机制验证（生命周期、能力、错误隔离） | `hello_probe` / `hello_greet` / `hello_fail` |
+| `text_toolbox` | 真实业务：纯本地文本处理 | `text_defaults` / `text_stats` / `text_dedupe` / `text_export` |
+| `video_analyzer` | 真实业务：基于 FFmpeg 的视频结构分析 | `video_probe` / `video_split_shots` / `video_extract_keyframes` / `video_analyze` |
+
+### video_analyzer
+
+只用 FFmpeg，**不含 AI、不联网、零第三方依赖**：
+
+```powershell
+# 读取媒体信息
+python run.py tool call video_probe --kwargs "{`"path`": `"D:/clip.mp4`"}"
+
+# 切分镜头（按画面变化）
+python run.py tool call video_split_shots --kwargs "{`"path`": `"D:/clip.mp4`", `"threshold`": 0.3}"
+
+# 抽取关键帧（写入插件自己的数据目录）
+python run.py tool call video_extract_keyframes --kwargs "{`"path`": `"D:/clip.mp4`", `"frames_per_shot`": 3}"
+
+# 一次拿到完整结构
+python run.py tool call video_analyze --kwargs "{`"path`": `"D:/clip.mp4`"}"
+```
+
+> **Windows 提示**：PowerShell 会把 `--kwargs` 里的双引号吃掉。请用上面的反引号转义写法，
+> 或 `cmd /c "python run.py ... --kwargs \"{...}\""`。
+
+可配置项（用户层配置 `config/plugins.json`）：`scene_threshold`、`min_shot_seconds`、
+`keyframes_per_shot`、`max_shots`、`frame_width`。
 
 ---
 

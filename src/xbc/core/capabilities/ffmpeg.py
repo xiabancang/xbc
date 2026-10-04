@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -95,6 +96,39 @@ class FFmpegService:
         )
 
     # ---------- 元数据 ----------
+    def run_probe(self, args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+        """执行 ffprobe，参数由调用方给出。"""
+        if not self.ffprobe:
+            raise ServiceUnavailable(
+                f"未找到 ffprobe（当前配置为 {self._ffprobe_cfg!r}）；"
+                "请安装 FFmpeg 并加入 PATH，或在 config.json 的 ffmpeg.ffprobe_path 指定绝对路径"
+            )
+        command = [self.ffprobe, *[str(a) for a in args]]
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+
+    def probe_media(self, path: Path | str) -> dict[str, Any]:
+        """读取媒体信息（format + streams），返回解析后的字典。
+
+        只负责"取信息"，**不做任何业务判断** —— 哪些字段有用、怎么解释，属于插件的事。
+        """
+        result = self.run_probe(
+            ["-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)]
+        )
+        try:
+            data = json.loads((result.stdout or "").strip() or "{}")
+        except json.JSONDecodeError as exc:
+            raise ServiceUnavailable(f"解析 ffprobe 输出失败: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ServiceUnavailable("ffprobe 输出格式不符合预期")
+        return data
+
     def probe_duration(self, video_path: Path | str) -> float | None:
         """读取媒体时长（秒）。命令形式参考 V18 的 ffprobe_duration 实现。
 

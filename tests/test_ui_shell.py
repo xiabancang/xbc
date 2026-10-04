@@ -176,11 +176,12 @@ class ShellTests(unittest.TestCase):
     def test_desktop_and_cli_observe_the_same_state(self) -> None:
         """桌面启用后，另一个 Runtime 实例（即 CLI 的行为）观察到相同状态与工具集。
 
-        注意：这里必须在桌面侧把两个插件都启用，才能与 `activate_all()` 对齐 ——
+        注意：这里必须在桌面侧把**所有**插件都启用，才能与 `activate_all()` 对齐 ——
         差异只能来自"激活了哪些插件"，不能来自"对同一插件看法不同"。
         """
-        self.host.enable("text_toolbox")
-        self.host.enable("hello_xbc")
+        for record in list(self.host.manager.records()):
+            self.host.enable(record.id)
+        enabled_ids = [r.id for r in self.host.manager.records()]
 
         ctx2 = AppContext.create(root=self.root, console=False)
         self.addCleanup(ctx2.close)
@@ -188,7 +189,7 @@ class ShellTests(unittest.TestCase):
         manager2.discover()
         manager2.activate_all()
 
-        for plugin_id in ("text_toolbox", "hello_xbc"):
+        for plugin_id in enabled_ids:
             self.assertEqual(
                 manager2.get(plugin_id).state,
                 self.host.manager.get(plugin_id).state,

@@ -231,7 +231,14 @@ class PluginManager:
             return record
 
         try:
+            # 配置在**每次激活时**重新读取：用户改了配置，重新启用就该生效。
             config = self._ctx.effective_config_for(record.manifest)
+            record.config_source = self._ctx.config_source_for(record.manifest)
+            # 让 ctx.config 与 apply 的入参保持一致 —— 否则重新激活后
+            # 插件的 ctx.config 还是上一次的旧配置（曾经的一个真实 bug）
+            if record.instance.ctx is not None:
+                record.instance.ctx.config = config
+
             record.instance.apply(record.instance.ctx, config)
             registered = self._ctx.hooks.register(record.instance, record.id)
             record.tools_registered = record.instance.ctx.tools.names()

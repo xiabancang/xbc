@@ -1,0 +1,65 @@
+{
+  "id": "video_analyzer",
+  "name": "视频分析器",
+  "version": "0.1.0",
+  "spec_version": "1.0",
+  "api_version": "1.0",
+  "entry": "plugin.py:VideoAnalyzerPlugin",
+  "description": "基于 FFmpeg 的本地视频分析：读取媒体信息、按画面变化切分镜头、抽取关键帧。不依赖 AI、不联网。",
+  "author": "夏半仓",
+  "capabilities": ["files", "ffmpeg", "settings"],
+  "tools": [
+    {
+      "name": "video_probe",
+      "description": "读取视频的基本信息：时长、分辨率、帧率、编码、码率、音视频轨",
+      "risk": "read"
+    },
+    {
+      "name": "video_split_shots",
+      "description": "按画面变化把视频切分成镜头，返回每个镜头的时间区间",
+      "risk": "read"
+    },
+    {
+      "name": "video_extract_keyframes",
+      "description": "为每个镜头抽取关键帧并保存到插件数据目录，返回帧文件清单",
+      "risk": "read"
+    },
+    {
+      "name": "video_analyze",
+      "description": "一次完成：媒体信息 + 镜头切分 + 关键帧抽取，返回完整结构化结果",
+      "risk": "read"
+    }
+  ],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "scene_threshold": {
+        "type": "number",
+        "default": 0.3,
+        "minimum": 0.05,
+        "maximum": 0.95
+      },
+      "min_shot_seconds": {
+        "type": "number",
+        "default": 0.5,
+        "minimum": 0.1
+      },
+      "keyframes_per_shot": {
+        "type": "integer",
+        "default": 3,
+        "minimum": 1,
+        "maximum": 20
+      },
+      "max_shots": {
+        "type": "integer",
+        "default": 200,
+        "minimum": 1
+      },
+      "frame_width": {
+        "type": "integer",
+        "default": 480,
+        "minimum": 64
+      }
+    }
+  }
+}
