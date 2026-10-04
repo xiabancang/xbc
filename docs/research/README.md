@@ -159,6 +159,46 @@ CLIP **8 胜 1 平 1 负**，但那 1 负（`宇宙星云`：Caption 排名 1 vs
 
 ---
 
+## TASK-010 采用记录：chinese-clip-rn50
+
+TASK-010（检索质量修复）决定采用 **`OFA-Sys/chinese-clip-rn50`**。按规则登记六栏：
+
+| 项 | 内容 |
+|---|---|
+| **项目 / 来源** | 代码 `OFA-Sys/Chinese-CLIP`（MIT，6,013★）；权重 `OFA-Sys/chinese-clip-rn50` |
+| **许可证** | **Apache-2.0**（HF `model_info().cardData['license'] == 'apache-2.0'`，`license:apache-2.0` 标签）；代码 MIT |
+| **可商业使用** | ✅ **可以** —— Apache-2.0 无 copyleft 传染（对比：MaterialSearch GPL-3.0、VideoSeek AGPL-3.0 均不可用） |
+| **使用方式** | **采用**（集成**模型**，不搬代码）：用官方 `cn_clip` 包**一次性导出 ONNX**，运行时不依赖 `cn_clip`/`torch` |
+| **架构冲突** | **有**：Core 的 embedding 能力只接受文本，图片嵌入无法经 Core Capability → **已停下报告待裁决**（见 TASK-010 报告 §4） |
+| **时效性** | 权重 2022-11-09 上传（较早，但模型本身不需要频繁更新）；代码最后提交 2026-03-31 |
+
+**为什么不用 `vit-base-patch16`**：它的**权重在 HF 上未声明许可证**，
+而 TASK-010 禁止项明确列了"❌ 使用 chinese-clip-vit-base-patch16（权重许可证未声明）"。
+**rn50 是唯一许可证干净的候选**，代价是它**不是 transformers 格式**
+（HF 上只有 `clip_cn_rn50.pt`，需要 `cn_clip` 包加载后自行导出 ONNX）。
+
+**部署形态（实测）**：
+
+| 环节 | 依赖 | 说明 |
+|---|---|---|
+| 导出（一次性，开发机） | `torch` + `cn_clip` + `torchvision` + `timm` + `onnx` | **不需要在用户机器上做** |
+| 运行 | **`onnxruntime` + `numpy` + `pillow`** | **运行时不需要 torch** |
+
+产物：`vision_model.onnx` 146.1 MB + `text_model.onnx` 147.6 MB + `vocab.txt` 0.1 MB ≈ **294 MB**。
+
+**导出正确性**：ONNX 与 torch 在 14 帧图像 + 10 条中文查询上**余弦全部 = 1.00000000**（精确等价）。
+
+**性能与质量（本机实测）**：视觉塔 **27 ms/帧**、文本塔 **10.5 ms/查询**；
+中文检索 **top-1 10/10、前 3 10/10**（同批 14 帧 / 10 个查询）。
+
+> ⚠️ **预处理必须与官方逐字一致**：官方 `image_transform(224)` 是
+> `Resize((224,224))`（**直接拉成正方形**），不是标准 CLIP 的 shortest-edge + center-crop。
+> 用错预处理实测 **top-1 从 10/10 掉到 7/10**。
+> （对照：amon-hen 的 MobileCLIP2 结论正好相反 —— 它发现拉伸会损失 0.03 余弦而改用裁切。
+> **不同模型的预处理要求相反，必须按各自官方实现来。**）
+
+---
+
 ## 逐项目说明
 
 ### pluggy

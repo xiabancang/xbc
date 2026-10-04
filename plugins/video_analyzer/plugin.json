@@ -55,6 +55,11 @@
       "risk": "read"
     },
     {
+      "name": "library_audit",
+      "description": "审计库里每条向量的溯源：被嵌入的原始文本、provider/model、维度、产生时间、来源素材哈希",
+      "risk": "read"
+    },
+    {
       "name": "library_search_labels",
       "description": "按标签检索镜头（match=exact 精确 / fuzzy 模糊子串）",
       "risk": "read"

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,11 @@ def _hash_file(path: Path, chunk: int = 1024 * 1024) -> str:
                 break
             digest.update(block)
     return digest.hexdigest()
+
+
+def _timestamp() -> str:
+    """入库时间戳（秒精度）。与存储层的 `Library.now()` 同一格式。"""
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def _mean_vector(vectors: list[list[float]], dim: int) -> list[float]:
@@ -336,6 +342,15 @@ class VideoAnalyzerPlugin(XbcPlugin):
             output_schema=object_output, risk="read",
         )
         ctx.tools.register(
+            "library_audit", self.library_audit,
+            description="审计库里每条向量的溯源：被嵌入的原始文本、provider/model、维度、产生时间、来源素材哈希",
+            input_schema={
+                "type": "object",
+                "properties": {"shot_id": {"type": "integer", "minimum": 1}},
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
             "library_search_labels", self.library_search_labels,
             description="按标签检索镜头（match=exact 精确 / fuzzy 模糊子串）",
             input_schema={
@@ -384,7 +399,7 @@ class VideoAnalyzerPlugin(XbcPlugin):
                 "未检测到 FFmpeg：video_analyzer 的工具会在调用时明确报错，"
                 "请安装 FFmpeg 或配置 ffmpeg.ffmpeg_path"
             )
-        self.log.info("apply：已注册 12 个视频工具，配置 = %s", self._cfg)
+        self.log.info("apply：已注册 13 个视频工具，配置 = %s", self._cfg)
 
     # ---------------- 工具实现 ----------------
     def video_probe(self, path: str) -> dict[str, Any]:
@@ -641,6 +656,30 @@ class VideoAnalyzerPlugin(XbcPlugin):
         ]
         return stats
 
+    def library_audit(self, shot_id: int | None = None) -> dict[str, Any]:
+        """审计：每条向量到底是用什么文本、哪个 provider/model、什么时候算出来的。
+
+        TASK-010 第一部分的核心入口 —— v1 只存 `labels`，库里看不到真正被嵌入的文本，
+        检索行为无法解释。现在一次调用就能回答"这条向量从哪来"。
+
+        `kind='shot_centroid'` 表示该向量是**多帧质心**，`embed_text` 是参与平均的各帧文本，
+        不是直接嵌入的单段文字。
+        """
+        library = self._library()
+        records = library.vector_audit(shot_id)
+        missing = [item for item in records if not item["has_embed_text"]]
+        stats = library.stats()
+        return {
+            "library_path": stats["library_path"],
+            "schema_version": stats["schema_version"],
+            "vectors_total": len(records),
+            "vectors_auditable": len(records) - len(missing),
+            "auditable": not missing,
+            "missing_embed_text": [item["vector_id"] for item in missing],
+            "note": stats["note"] or "所有向量都记录了被嵌入的原文，可审计。",
+            "records": records,
+        }
+
     def library_scan(self, directory: str, force: bool = False) -> dict[str, Any]:
         """扫描目录并把视频分析入库。
 
@@ -822,16 +861,17 @@ class VideoAnalyzerPlugin(XbcPlugin):
                     errors.append({"frame": frame["file"], "error": str(exc)})
                     continue
 
-                labeled = ""
                 try:
+                    # **这个字符串就是被嵌入的东西**，必须落库（TASK-010 第一部分）。
+                    # v1 只存了 labels，导致库里看不到真正被嵌入的文本、检索行为无法审计。
                     text_for_embedding = " ".join(
                         [annotated.answer, *annotated.labels]
                     ).strip()
                     embedded = self.ctx.ai.embedding([text_for_embedding])
-                    labeled = text_for_embedding
                 except AIError as exc:
                     errors.append({"frame": frame["file"], "error": str(exc)})
                     embedded = None
+                    text_for_embedding = ""
 
                 provider, model = annotated.provider, annotated.model
                 analyzed += 1
@@ -845,8 +885,9 @@ class VideoAnalyzerPlugin(XbcPlugin):
                         "frame_index": len(frame_records) - 1,
                         "provider": embedded.provider, "model": embedded.model,
                         "dim": embedded.dim, "values": embedded.vectors[0],
+                        "embed_text": text_for_embedding,
+                        "created_at": _timestamp(),
                     })
-                del labeled
 
             vector = None
             if frame_vectors:
@@ -856,6 +897,12 @@ class VideoAnalyzerPlugin(XbcPlugin):
                     vector = {
                         "provider": frame_vectors[0]["provider"],
                         "model": frame_vectors[0]["model"], "dim": dim, "values": values,
+                        # 镜头级是**质心**，不是直接嵌入某段文本。这里记下参与平均的
+                        # 各帧文本，配合 kind='shot_centroid' 说明它不代表"被嵌入的原文"。
+                        "embed_text": " | ".join(
+                            item["embed_text"] for item in frame_vectors
+                        ),
+                        "created_at": _timestamp(),
                     }
 
             payload.append({

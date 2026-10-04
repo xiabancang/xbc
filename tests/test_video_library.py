@@ -7,8 +7,11 @@
 
 from __future__ import annotations
 
+import array
 import hashlib
+import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -64,6 +67,8 @@ class FakeAIProvider(ModelProvider):
     def __init__(self, *, fail_times: int = 0) -> None:
         self.calls = 0
         self.fail_times = fail_times
+        #: 记录**真正收到的嵌入文本**，用于验证库里存的 embed_text 就是喂进来的原文
+        self.embedded_texts: list[str] = []
 
     def available(self) -> bool:
         return True
@@ -102,6 +107,7 @@ class FakeAIProvider(ModelProvider):
         return [value / norm for value in values] if norm else values
 
     def embedding(self, request: EmbeddingRequest) -> EmbeddingResult:
+        self.embedded_texts.extend(request.texts)
         return EmbeddingResult(
             vectors=[self._vector(text) for text in request.texts],
             provider=self.name, model="fake-embed",
@@ -496,6 +502,205 @@ class RebuildTests(_Base):
         self.scan()
         self.call("library_rebuild", directory=str(self.materials))
         self.assertTrue(self.clip.is_file(), "重建只动库，不动素材")
+
+
+# ================= TASK-010 第一部分：存储可审计性 =================
+
+
+class AuditabilityTests(_Base):
+    """v1 的缺陷是"向量由 answer + labels 算出，但库里只存 labels"。
+
+    这一组测试把"可审计"钉成契约：**每条向量必须能回答它是从哪个字符串算出来的**。
+    """
+
+    def test_every_vector_records_the_embedded_text(self) -> None:
+        self.scan()
+        value = self.call("library_audit").value
+        self.assertTrue(value["auditable"])
+        self.assertEqual(value["vectors_auditable"], value["vectors_total"])
+        self.assertEqual(value["missing_embed_text"], [])
+        for record in value["records"]:
+            self.assertTrue(record["has_embed_text"], f"vector#{record['vector_id']} 缺 embed_text")
+            self.assertGreater(record["embed_text_chars"], 0)
+
+    def test_embedded_text_is_exactly_what_the_provider_received(self) -> None:
+        """不是"存了个大概" —— 存的必须是喂给 embedding 的原文。"""
+        self.scan()
+        records = self.call("library_audit").value["records"]
+        frame_records = [r for r in records if r["kind"] == "frame"]
+        self.assertEqual(len(frame_records), 3, "测试视频 3 个镜头、每镜头 1 帧")
+
+        sent = getattr(self.provider, "embedded_texts", [])
+        self.assertEqual(len(sent), 3, "假 Provider 应收到 3 次嵌入请求")
+        self.assertEqual(
+            sorted(r["embed_text"] for r in frame_records), sorted(sent),
+            "库里存的 embed_text 必须与真正送给 provider 的文本逐字相同",
+        )
+
+    def test_audit_records_provider_and_model(self) -> None:
+        self.scan()
+        for record in self.call("library_audit").value["records"]:
+            self.assertEqual(record["provider"], "fake")
+            self.assertEqual(record["model"], "fake-embed")
+            self.assertEqual(record["dim"], EMBED_DIM)
+
+    def test_audit_records_time_and_material_hash(self) -> None:
+        self.scan()
+        digest = hashlib.sha256(self.clip.read_bytes()).hexdigest()[:16]
+        for record in self.call("library_audit").value["records"]:
+            self.assertTrue(record["created_at"], "必须记录向量产生时间")
+            self.assertEqual(record["video_hash"], digest, "必须记录来源素材的内容哈希")
+            self.assertTrue(record["video_analyzed_at"], "必须记录素材入库时间")
+            self.assertTrue(Path(record["video_path"]).is_file())
+
+    def test_shot_level_vectors_are_marked_as_centroid(self) -> None:
+        """镜头级是多帧质心，不是直接嵌入的某段文本 —— 必须能区分，否则会误读。"""
+        self.scan()
+        records = self.call("library_audit").value["records"]
+        kinds = {r["kind"] for r in records}
+        self.assertEqual(kinds, {"frame", "shot_centroid"})
+        stats = self.call("library_status").value
+        self.assertEqual(stats["vectors_by_kind"], {"frame": 3, "shot_centroid": 3})
+
+    def test_audit_can_be_scoped_to_one_shot(self) -> None:
+        self.scan()
+        all_records = self.call("library_audit").value["records"]
+        shot_id = all_records[0]["shot_id"]
+        scoped = self.call("library_audit", shot_id=shot_id).value["records"]
+        self.assertTrue(scoped)
+        self.assertTrue(all(r["shot_id"] == shot_id for r in scoped))
+        self.assertLess(len(scoped), len(all_records))
+
+    def test_search_is_deterministic_on_a_fixed_library(self) -> None:
+        """同一份库、同一个查询跑两次必须完全一致 —— 这是"可复现"的下限。"""
+        self.scan()
+        first = self.call("library_search_semantic", query="shot001", limit=3).value
+        second = self.call("library_search_semantic", query="shot001", limit=3).value
+        self.assertEqual(json.dumps(first, ensure_ascii=False, sort_keys=True),
+                         json.dumps(second, ensure_ascii=False, sort_keys=True))
+
+    def test_reingest_is_skipped_by_hash_so_results_do_not_drift(self) -> None:
+        """不强制重分析时，重复扫描不改变库 —— 检索结果自然不漂。"""
+        self.scan()
+        before = self.call("library_audit").value["records"]
+        self.scan()
+        after = self.call("library_audit").value["records"]
+        self.assertEqual(
+            [(r["vector_id"], r["embed_text"], r["created_at"]) for r in before],
+            [(r["vector_id"], r["embed_text"], r["created_at"]) for r in after],
+        )
+
+
+class SchemaMigrationTests(unittest.TestCase):
+    """v1 旧库必须能升级，且**如实承认旧向量不可审计**。"""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="xbc-migrate-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.path = self.root / "library.db"
+        self._make_v1_library()
+
+    def _make_v1_library(self) -> None:
+        """手搓一个 v1 结构的库（vectors 表没有 kind/embed_text/created_at）。"""
+        connection = sqlite3.connect(str(self.path))
+        connection.executescript("""
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL DEFAULT '', size_bytes INTEGER NOT NULL DEFAULT 0,
+                duration_seconds REAL, width INTEGER, height INTEGER, fps REAL,
+                status TEXT NOT NULL DEFAULT 'pending', error TEXT NOT NULL DEFAULT '',
+                analyzed_at TEXT NOT NULL DEFAULT '');
+            CREATE TABLE shots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, video_id INTEGER NOT NULL,
+                shot_index INTEGER NOT NULL, start_seconds REAL NOT NULL,
+                end_seconds REAL NOT NULL, duration_seconds REAL NOT NULL,
+                ai_provider TEXT NOT NULL DEFAULT '', ai_model TEXT NOT NULL DEFAULT '',
+                UNIQUE(video_id, shot_index));
+            CREATE TABLE frames (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, shot_id INTEGER NOT NULL,
+                time_seconds REAL NOT NULL, file_path TEXT NOT NULL,
+                UNIQUE(shot_id, file_path));
+            CREATE TABLE labels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, shot_id INTEGER NOT NULL,
+                frame_id INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'ai', UNIQUE(shot_id, text, source));
+            CREATE TABLE vectors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, shot_id INTEGER NOT NULL,
+                frame_id INTEGER NOT NULL DEFAULT 0, provider TEXT NOT NULL,
+                model TEXT NOT NULL, dim INTEGER NOT NULL, vector BLOB NOT NULL,
+                UNIQUE(shot_id, frame_id));
+        """)
+        connection.execute("INSERT INTO meta(key, value) VALUES('schema_version','1')")
+        connection.execute(
+            "INSERT INTO videos(id, path, file_hash, status, analyzed_at)"
+            " VALUES(1,'/old/clip.mp4','deadbeef','ok','2026-10-05T00:00:00')"
+        )
+        connection.execute(
+            "INSERT INTO shots(id, video_id, shot_index, start_seconds, end_seconds,"
+            " duration_seconds) VALUES(1,1,0,0.0,1.0,1.0)"
+        )
+        connection.execute(
+            "INSERT INTO vectors(shot_id, frame_id, provider, model, dim, vector)"
+            " VALUES(1,0,'ollama','nomic-embed-text',4,?)",
+            (array.array("f", [1.0, 0.0, 0.0, 0.0]).tobytes(),),
+        )
+        connection.commit()
+        connection.close()
+
+    def test_v1_columns_are_added_on_initialize(self) -> None:
+        connection = sqlite3.connect(str(self.path))
+        before = {row[1] for row in connection.execute("PRAGMA table_info(vectors)")}
+        connection.close()
+        self.assertNotIn("embed_text", before, "前置条件：这是一份 v1 库")
+
+        library = Library(self.path)
+        library.initialize()
+
+        connection = sqlite3.connect(str(self.path))
+        after = {row[1] for row in connection.execute("PRAGMA table_info(vectors)")}
+        version = connection.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        connection.close()
+        self.assertTrue({"kind", "embed_text", "created_at"} <= after)
+        self.assertEqual(version, "2")
+
+    def test_migrated_library_reports_itself_as_not_auditable(self) -> None:
+        """旧向量无法反推原文 —— 必须如实说，不能假装可审计。"""
+        library = Library(self.path)
+        library.initialize()
+        stats = library.stats()
+        self.assertEqual(stats["schema_version"], 2)
+        self.assertEqual(stats["vectors"], 1)
+        self.assertEqual(stats["vectors_with_embed_text"], 0)
+        self.assertFalse(stats["auditable"])
+        self.assertIn("重新入库", stats["note"])
+
+        records = library.vector_audit()
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["has_embed_text"])
+        self.assertEqual(records[0]["embed_text"], "")
+
+    def test_migration_is_idempotent(self) -> None:
+        library = Library(self.path)
+        library.initialize()
+        library.initialize()
+        library.initialize()
+        connection = sqlite3.connect(str(self.path))
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(vectors)")]
+        connection.close()
+        self.assertEqual(len(columns), len(set(columns)), "不能重复加列")
+
+    def test_showstopper_v1_rows_survive_migration(self) -> None:
+        """迁移不能丢数据：旧向量本身必须留着（只是没有原文）。"""
+        library = Library(self.path)
+        library.initialize()
+        record = library.vector_audit()[0]
+        self.assertEqual(record["provider"], "ollama")
+        self.assertEqual(record["model"], "nomic-embed-text")
+        self.assertEqual(record["dim"], 4)
+        self.assertGreater(record["vector_bytes"], 0)
 
 
 if __name__ == "__main__":

@@ -19,10 +19,27 @@
 | `shots` | 所属视频、镜头序号、起止秒、AI 来源（provider/model） |
 | `frames` | 所属镜头、时间码、图片路径 |
 | `labels` | 所属镜头、标签文本、来源 |
-| `vectors` | 镜头级与帧级 embedding（float32 打包成 BLOB） |
+| `vectors` | 镜头级与帧级 embedding（float32 打包成 BLOB），**并记录被嵌入的原始文本、provider/model、产生时间** |
 
 **增量判定用内容哈希，不用路径或修改时间** —— 文件被改名、被复制、
 时间戳被同步工具改动，都不应该导致重复分析；而内容真的变了就必须重分析。
+
+## TASK-010 修的存储缺陷（v2）
+
+v1 只存了 `labels`，但向量其实是由 `answer + labels` 算出来的 ——
+**库里看不到真正被嵌入的文本，检索行为无法审计**。v2 在 `vectors` 上补三列：
+
+| 列 | 作用 |
+|---|---|
+| `embed_text` | **真正被嵌入的原始文本**（可审计） |
+| `kind` | `frame`（单帧）/ `shot_centroid`（多帧质心），避免把质心当成单帧文本 |
+| `created_at` | 向量产生时间（可追溯） |
+
+配合既有的 `vectors.provider` / `vectors.model` / `videos.file_hash` / `videos.analyzed_at`，
+一次检索结果可以被完整解释。**
+
+旧库（v1）升级时这三列会被补上，但 `embed_text` 只能是空字符串 ——
+**已经算过的向量无法反推原文**，所以旧库需要重新入库才能获得可审计性。
 """
 
 from __future__ import annotations
@@ -35,7 +52,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -93,17 +110,31 @@ CREATE INDEX IF NOT EXISTS idx_labels_text ON labels(text);
 CREATE INDEX IF NOT EXISTS idx_labels_shot ON labels(shot_id);
 
 CREATE TABLE IF NOT EXISTS vectors (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    shot_id  INTEGER NOT NULL REFERENCES shots(id) ON DELETE CASCADE,
-    frame_id INTEGER NOT NULL DEFAULT 0,
-    provider TEXT    NOT NULL,
-    model    TEXT    NOT NULL,
-    dim      INTEGER NOT NULL,
-    vector   BLOB    NOT NULL,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    shot_id    INTEGER NOT NULL REFERENCES shots(id) ON DELETE CASCADE,
+    frame_id   INTEGER NOT NULL DEFAULT 0,
+    -- 'frame' = 单帧向量；'shot_centroid' = 该镜头多帧向量的质心
+    kind       TEXT    NOT NULL DEFAULT 'frame',
+    provider   TEXT    NOT NULL,
+    model      TEXT    NOT NULL,
+    dim        INTEGER NOT NULL,
+    vector     BLOB    NOT NULL,
+    -- **真正被嵌入的原始文本**。TASK-009 只存了 labels，
+    -- 而向量其实是由 answer + labels 算出来的 —— 导致检索行为无法审计。
+    -- 这一列是 TASK-010 的核心修复。
+    embed_text TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL DEFAULT '',
     UNIQUE(shot_id, frame_id)
 );
 CREATE INDEX IF NOT EXISTS idx_vectors_shot ON vectors(shot_id);
 """
+
+#: 从 v1 升到 v2 要补的列（旧库缺这三列，且无法反推 embed_text）
+MIGRATIONS_V2 = (
+    ("kind", "ALTER TABLE vectors ADD COLUMN kind TEXT NOT NULL DEFAULT 'frame'"),
+    ("embed_text", "ALTER TABLE vectors ADD COLUMN embed_text TEXT NOT NULL DEFAULT ''"),
+    ("created_at", "ALTER TABLE vectors ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
+)
 
 
 class LibraryError(RuntimeError):
@@ -169,7 +200,7 @@ class Library:
             connection.close()
 
     def initialize(self) -> None:
-        """建表。库文件损坏时抛**可操作**的 `LibraryError`，而不是 sqlite3 的原始异常。
+        """建表 + 迁移。库文件损坏时抛**可操作**的 `LibraryError`。
 
         刻意**不自动重建**：自动删库等于静默丢数据。正确的恢复路径是显式调用
         `library_rebuild` —— 它先删文件、不依赖打开成功。
@@ -177,6 +208,7 @@ class Library:
         try:
             with self.session() as connection:
                 connection.executescript(DDL)
+                self._migrate(connection)
                 connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
@@ -187,6 +219,22 @@ class Library:
                 f"原始错误：{exc}\n"
                 "恢复方式：调用 library_rebuild（会丢弃库文件并从视频重新分析）。"
             ) from exc
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> list[str]:
+        """把旧库补到当前 schema。返回实际补了哪些列。
+
+        `CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，所以老库必须走这里。
+        `embed_text` 补上后是空串 —— **已算过的向量无法反推原文**，
+        旧库要重新入库才有可审计性（`schema_note` 会如实说明）。
+        """
+        existing = {row["name"] for row in connection.execute("PRAGMA table_info(vectors)")}
+        added: list[str] = []
+        for column, statement in MIGRATIONS_V2:
+            if column not in existing:
+                connection.execute(statement)
+                added.append(column)
+        return added
 
     def exists(self) -> bool:
         return self.path.is_file()
@@ -297,8 +345,9 @@ class Library:
                     index = int(vector.get("frame_index", -1))
                     frame_id = frame_ids[index] if 0 <= index < len(frame_ids) else 0
                     connection.execute(
-                        "INSERT OR REPLACE INTO vectors(shot_id, frame_id, provider, model,"
-                        " dim, vector) VALUES(?,?,?,?,?,?)",
+                        "INSERT OR REPLACE INTO vectors(shot_id, frame_id, kind, provider,"
+                        " model, dim, vector, embed_text, created_at)"
+                        " VALUES(?,?,'frame',?,?,?,?,?,?)",
                         (
                             shot_id,
                             frame_id,
@@ -306,20 +355,25 @@ class Library:
                             str(vector["model"]),
                             int(vector["dim"]),
                             pack_vector(vector["values"]),
+                            str(vector.get("embed_text", "")),
+                            str(vector.get("created_at") or now()),
                         ),
                     )
 
                 shot_vector = shot.get("vector")
                 if shot_vector:
                     connection.execute(
-                        "INSERT OR REPLACE INTO vectors(shot_id, frame_id, provider, model,"
-                        " dim, vector) VALUES(?,0,?,?,?,?)",
+                        "INSERT OR REPLACE INTO vectors(shot_id, frame_id, kind, provider,"
+                        " model, dim, vector, embed_text, created_at)"
+                        " VALUES(?,0,'shot_centroid',?,?,?,?,?,?)",
                         (
                             shot_id,
                             str(shot_vector["provider"]),
                             str(shot_vector["model"]),
                             int(shot_vector["dim"]),
                             pack_vector(shot_vector["values"]),
+                            str(shot_vector.get("embed_text", "")),
+                            str(shot_vector.get("created_at") or now()),
                         ),
                     )
             return count
@@ -364,6 +418,23 @@ class Library:
             dim = connection.execute(
                 "SELECT dim FROM vectors WHERE frame_id = 0 LIMIT 1"
             ).fetchone()
+            auditable = connection.execute(
+                "SELECT COUNT(*) FROM vectors WHERE embed_text <> ''"
+            ).fetchone()[0]
+            kinds = {
+                row["kind"]: row["n"]
+                for row in connection.execute(
+                    "SELECT kind, COUNT(*) AS n FROM vectors GROUP BY kind"
+                ).fetchall()
+            }
+        note = ""
+        if total_vectors and not auditable:
+            note = (
+                "库里所有向量都没有 embed_text（v1 旧库）—— "
+                "已经算过的向量无法反推原文，需要重新入库（library_rebuild）才有可审计性。"
+            )
+        elif 0 < auditable < total_vectors:
+            note = f"有 {total_vectors - auditable} 条向量缺少 embed_text（v1 遗留），建议重新入库。"
         return {
             "library_path": str(self.path),
             "library_exists": self.exists(),
@@ -374,8 +445,12 @@ class Library:
             "labels": total_labels,
             "distinct_labels": distinct_labels,
             "vectors": total_vectors,
-            "vector_dim": dim["dim"] if dim else None,
+            "vectors_by_kind": kinds,
+            "vectors_with_embed_text": auditable,
+            "auditable": bool(total_vectors) and auditable == total_vectors,
             "schema_version": SCHEMA_VERSION,
+            "vector_dim": dim["dim"] if dim else None,
+            "note": note,
         }
 
     # ---------------- 检索：标签 ----------------
@@ -421,9 +496,10 @@ class Library:
 
     # ---------------- 检索：语义 ----------------
     def shot_vectors(self) -> list[dict[str, Any]]:
-        """全部镜头级向量（`frame_id = 0`）。"""
+        """全部镜头级向量（`frame_id = 0`），**带可审计的溯源信息**。"""
         sql = """
             SELECT ve.shot_id, ve.provider, ve.model, ve.dim, ve.vector,
+                   ve.kind, ve.embed_text, ve.created_at,
                    s.shot_index, s.start_seconds, s.end_seconds, s.duration_seconds,
                    v.id AS video_id, v.path AS video_path
               FROM vectors ve
@@ -445,7 +521,60 @@ class Library:
                 "provider": row["provider"],
                 "model": row["model"],
                 "dim": row["dim"],
+                "kind": row["kind"],
+                "embed_text": row["embed_text"],
+                "created_at": row["created_at"],
                 "values": unpack_vector(row["vector"]),
+            }
+            for row in rows
+        ]
+
+    # ---------------- 审计：这条向量到底是用什么文本算出来的 ----------------
+    def vector_audit(self, shot_id: int | None = None) -> list[dict[str, Any]]:
+        """返回向量的完整溯源：被嵌入的文本、provider/model、维度、产生时间、来源素材哈希。
+
+        这是 TASK-010 第一部分的核心 —— v1 只存 labels，看不到真正被嵌入的文本，
+        检索行为无法解释。现在每一条向量都能回答"它是从哪个字符串算出来的"。
+        """
+        sql = """
+            SELECT ve.id AS vector_id, ve.shot_id, ve.frame_id, ve.kind,
+                   ve.provider, ve.model, ve.dim, ve.embed_text, ve.created_at,
+                   ve.vector,
+                   s.shot_index, s.start_seconds, s.end_seconds,
+                   v.path AS video_path, v.file_hash, v.analyzed_at
+              FROM vectors ve
+              JOIN shots  s ON s.id = ve.shot_id
+              JOIN videos v ON v.id = s.video_id
+        """
+        args: tuple = ()
+        if shot_id is not None:
+            sql += " WHERE ve.shot_id = ?"
+            args = (int(shot_id),)
+        sql += " ORDER BY ve.shot_id, ve.frame_id"
+
+        with self.session() as connection:
+            rows = connection.execute(sql, args).fetchall()
+
+        return [
+            {
+                "vector_id": row["vector_id"],
+                "shot_id": row["shot_id"],
+                "frame_id": row["frame_id"],
+                "kind": row["kind"],
+                "provider": row["provider"],
+                "model": row["model"],
+                "dim": row["dim"],
+                "embed_text": row["embed_text"],
+                "embed_text_chars": len(row["embed_text"] or ""),
+                "has_embed_text": bool(row["embed_text"]),
+                "created_at": row["created_at"],
+                "video_path": row["video_path"],
+                "video_hash": (row["file_hash"] or "")[:16],
+                "video_analyzed_at": row["analyzed_at"],
+                "shot_index": row["shot_index"],
+                "start": round(row["start_seconds"], 3),
+                "end": round(row["end_seconds"], 3),
+                "vector_bytes": len(row["vector"]),
             }
             for row in rows
         ]
