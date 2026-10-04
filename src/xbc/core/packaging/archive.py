@@ -98,7 +98,13 @@ def build_package(plugin_dir: Path | str, output: Path | str | None = None) -> P
     except ValueError as exc:
         raise PackageError(f"{folder.name}: {exc}") from exc
 
-    target = Path(output) if output else folder.parent / f"{manifest.id}-{manifest.version}{PACKAGE_SUFFIX}"
+    # 默认输出到当前目录下的 dist/，而不是插件目录旁边 ——
+    # 否则在仓库里执行一次打包就会往 plugins/ 里丢一个构建产物。
+    target = (
+        Path(output)
+        if output
+        else Path.cwd() / "dist" / f"{manifest.id}-{manifest.version}{PACKAGE_SUFFIX}"
+    )
     if target.suffix.lower() not in ACCEPTED_SUFFIXES:
         target = target.with_suffix(PACKAGE_SUFFIX)
     target.parent.mkdir(parents=True, exist_ok=True)

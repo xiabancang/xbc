@@ -21,3 +21,7 @@ reports/
 
 # 调研原始材料：第三方规范/文档抓取，本地参考用，不入库
 mcp-research/
+
+# 插件打包产物：构建输出，不入库（`xbc plugin build` 默认写到 dist/）
+dist/
+*.xbcplugin
