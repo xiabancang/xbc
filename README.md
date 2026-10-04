@@ -47,6 +47,7 @@ XBC/
 │  │  ├─ tools/              工具注册表 + JSON Schema 校验（自研）
 │  │  ├─ skills/             技能注册表（目录 / 按需加载 / 调用策略）
 │  │  ├─ config/             三层配置装配
+│  │  ├─ packaging/          包格式 / 版本比较 / 安装·卸载·升级
 │  │  ├─ diagnostics.py      环境体检 + 运行时诊断
 │  │  └─ context.py          AppContext（内核）/ PluginContext（受限视图）
 │  └─ ui/shell.py            桌面管理入口（插件列表/状态、启用停用、Tool/Skill 列表）
@@ -54,7 +55,7 @@ XBC/
 │  ├─ hello_xbc/             机制验证插件
 │  ├─ text_toolbox/          真实业务插件：纯本地文本处理
 │  └─ video_analyzer/        真实业务插件：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取
-├─ tests/                    153 项测试
+├─ tests/                    203 项测试
 └─ docs/                     技术方案、测试报告、调研报告
 ```
 
@@ -75,6 +76,14 @@ python run.py plugin show text_toolbox
 python run.py plugin disable text_toolbox     # 持久化到用户层配置
 python run.py plugin enable text_toolbox
 
+# 插件包：打包 / 安装 / 升级 / 卸载
+python run.py plugin build plugins/video_analyzer        # → video_analyzer-0.1.0.xbcplugin
+python run.py plugin install video_analyzer-0.1.0.xbcplugin
+python run.py plugin upgrade video_analyzer-0.2.0.xbcplugin
+python run.py plugin installed                           # 已安装版本与安装台账
+python run.py plugin uninstall video_analyzer            # 保留用户数据
+python run.py plugin uninstall video_analyzer --purge    # 连用户数据与配置一起清
+
 # 工具（Agent 视角，带 inputSchema 与风险注解）
 python run.py tool list
 python run.py tool call text_stats --kwargs "{\"text\": \"a\nb\na\"}"
@@ -93,6 +102,55 @@ python run.py ui
 ```powershell
 python -m unittest discover -s tests          # 期望 Ran 123 tests / OK
 ```
+
+---
+
+## 插件包与安装升级
+
+### 包格式
+
+插件包就是一个 ZIP 归档，扩展名 `.xbcplugin`（也接受 `.zip`）：
+
+```
+video_analyzer-0.1.0.xbcplugin
+├─ plugin.json          清单（必需，位于归档根目录）
+├─ plugin.py            入口（必须与清单 entry 声明一致）
+├─ skills/…             可选
+└─ assets/…             可选
+```
+
+**没有引入额外的清单文件** —— 包里就是插件目录本身，`plugin.json` 既是运行期清单、
+也是包的元数据源。少一个概念，就少一处会不同步的地方。
+
+解包时做了三层防护：拒绝**路径穿越**（zip-slip）、拒绝**符号链接**、限制**解压体积**。
+打包与安装都会校验**版本号可比较**与**入口文件确实存在** —— 让不合规的包在发布/安装环节就被拦住，
+而不是等用户装完了才发现加载失败。
+
+### 安装是原子的
+
+安装与升级都是「解到临时目录 `.staging-*` → 校验 → 原子替换」。任何一步失败自动回滚，
+不会留下半个插件。`discover()` 会跳过 `.` 开头的目录，所以扫描时看不到半成品。
+
+### 版本与重名裁决
+
+- 版本用 SemVer 子集比较（`1.2.10 > 1.2.9`，`1.0.0-beta < 1.0.0`）；
+- **升级**默认只接受更高的版本；同版本或降级会被拒绝，需要 `--force`；
+- 插件同时存在于内置目录与用户目录时，**用户目录优先**（这是"用户升级了内置插件"的正常路径）。
+
+### 用户数据目录分离
+
+| 目录 | 内容 | 卸载（默认） | 卸载（`--purge`） | 升级 |
+|---|---|---|---|---|
+| `plugins/<id>/` | 插件代码 | **删除** | 删除 | **替换** |
+| `cache/<id>/` | 可重建的缓存 | **删除** | 删除 | 保留 |
+| `data/<id>/` | **用户数据** | **保留** | 删除 | 保留 |
+| `config/` 中该插件的配置 | 用户配置 | **保留** | 删除 | 保留 |
+
+**升级永远不会碰用户数据与配置** —— 所以升级不需要插件作者写迁移代码。
+
+安装台账在 `<数据目录>/installed.json`，记录安装时间、来源包与升级历史。
+注意：**版本以插件目录里的 `plugin.json` 为准**，台账只补安装元数据 ——
+这样台账丢失或被手工改动也不会报出错误的版本。
 
 ---
 

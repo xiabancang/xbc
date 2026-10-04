@@ -110,6 +110,56 @@ def cmd_plugin_disable(ctx: Any, args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------- 插件安装 / 卸载 / 升级（TASK-006） ----------------
+def cmd_plugin_install(ctx: Any, args: argparse.Namespace) -> int:
+    installer = ctx.create_installer()
+    result = installer.install(args.package, force=args.force)
+    _print_json(result.to_dict())
+    return 0 if result.ok else 1
+
+
+def cmd_plugin_upgrade(ctx: Any, args: argparse.Namespace) -> int:
+    installer = ctx.create_installer()
+    result = installer.upgrade(args.package, force=args.force)
+    _print_json(result.to_dict())
+    return 0 if result.ok else 1
+
+
+def cmd_plugin_uninstall(ctx: Any, args: argparse.Namespace) -> int:
+    installer = ctx.create_installer()
+    result = installer.uninstall(args.plugin_id, purge=args.purge)
+    _print_json(result.to_dict())
+    return 0 if result.ok else 1
+
+
+def cmd_plugin_installed(ctx: Any, args: argparse.Namespace) -> int:
+    installer = ctx.create_installer()
+    items = installer.installed()
+    _print_json(
+        {
+            "count": len(items),
+            "plugins_dir": str(ctx.paths.user_plugins_dir),
+            "ledger": str(installer.ledger_path),
+            "installed": [item.to_dict() for item in items],
+        }
+    )
+    return 0
+
+
+def cmd_plugin_build(ctx: Any, args: argparse.Namespace) -> int:
+    """把一个插件目录打成可分发的 .xbcplugin 包。"""
+    from .core.packaging import PackageError
+
+    installer = ctx.create_installer()
+    try:
+        package = installer.build(args.plugin_dir, args.output)
+    except PackageError as exc:
+        _print_json({"ok": False, "message": str(exc)})
+        return 1
+    _print_json({"ok": True, "package": str(package), "size_bytes": package.stat().st_size})
+    return 0
+
+
 # ---------------- 工具 ----------------
 def cmd_tool_list(ctx: Any, args: argparse.Namespace) -> int:
     manager = _manager(ctx)
@@ -251,6 +301,23 @@ def build_parser() -> argparse.ArgumentParser:
     disable = plugin.add_parser("disable", help="禁用插件")
     disable.add_argument("plugin_id")
     disable.set_defaults(func=cmd_plugin_disable)
+    install = plugin.add_parser("install", help="从插件包安装")
+    install.add_argument("package", help="插件包路径（.xbcplugin 或 .zip）")
+    install.add_argument("--force", action="store_true", help="已安装时强制覆盖")
+    install.set_defaults(func=cmd_plugin_install)
+    upgrade = plugin.add_parser("upgrade", help="从插件包升级")
+    upgrade.add_argument("package", help="插件包路径（.xbcplugin 或 .zip）")
+    upgrade.add_argument("--force", action="store_true", help="允许同版本重装或降级")
+    upgrade.set_defaults(func=cmd_plugin_upgrade)
+    uninstall = plugin.add_parser("uninstall", help="卸载插件")
+    uninstall.add_argument("plugin_id")
+    uninstall.add_argument("--purge", action="store_true", help="同时清除用户数据与配置")
+    uninstall.set_defaults(func=cmd_plugin_uninstall)
+    plugin.add_parser("installed", help="列出已安装插件与版本").set_defaults(func=cmd_plugin_installed)
+    build = plugin.add_parser("build", help="把插件目录打成可分发的包")
+    build.add_argument("plugin_dir", help="插件目录（含 plugin.json）")
+    build.add_argument("--output", default=None, help="输出路径，默认 <id>-<版本>.xbcplugin")
+    build.set_defaults(func=cmd_plugin_build)
 
     tool = sub.add_parser("tool", help="工具").add_subparsers(dest="tool_action", required=True)
     tool.add_parser("list", help="列出工具（Agent 视角）").set_defaults(func=cmd_tool_list)

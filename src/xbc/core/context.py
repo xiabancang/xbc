@@ -434,6 +434,21 @@ class AppContext:
 
         return PluginManager(self, self.plugin_search_paths(), self.logger)
 
+    def create_installer(self) -> Any:
+        """插件安装器。**只给宿主用**，不作为能力暴露给插件。
+
+        传入内核配置对象与重载回调，这样"彻底卸载"能同时清掉
+        运行期设置与三层配置行，并让内存副本立即与磁盘一致。
+        """
+        from .packaging.installer import PluginInstaller
+
+        return PluginInstaller(
+            self.paths,
+            self.logger,
+            config=self.config,
+            refresh_config=self.reload_plugin_config,
+        )
+
     def close(self) -> None:
         """释放内核持有的资源（当前主要是日志文件句柄）。"""
         shutdown_logging()

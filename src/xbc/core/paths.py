@@ -90,6 +90,15 @@ class AppPaths:
         """用户自己的 Skill 目录。"""
         return self.root / "skills"
 
+    @property
+    def installed_ledger(self) -> Path:
+        """插件安装台账：安装时间、来源、升级历史。
+
+        注意它**不是版本的权威来源** —— 版本以插件目录里的 `plugin.json` 为准
+        （见 PluginInstaller.installed 的说明）。
+        """
+        return self.root / "installed.json"
+
     # ---------- 插件私有空间 ----------
     def plugin_data_dir(self, plugin_id: str) -> Path:
         return self.data_dir / assert_safe_id(plugin_id)

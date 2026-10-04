@@ -51,6 +51,10 @@ class PluginRecord:
     scope: Scope | None = None
     config_source: str = "default"
     tools_registered: list[str] = field(default_factory=list)
+    #: 来自哪个搜索路径的下标（越大优先级越高：用户目录在内置目录之后）
+    source_index: int = 0
+    #: "builtin" 或 "user"，供界面与诊断展示
+    source: str = ""
 
     @property
     def id(self) -> str:
@@ -68,6 +72,7 @@ class PluginRecord:
             "error": self.error,
             "blocked_reason": self.blocked_reason,
             "config_source": self.config_source,
+            "source": self.source,
         }
         return data
 
@@ -85,6 +90,24 @@ class PluginManager:
         self._records: dict[str, PluginRecord] = {}
         self._modules: dict[str, Any] = {}
 
+        # 内置插件目录：用于给记录打上 builtin / user 标签
+        self._builtin_root: Path | None = None
+        try:
+            from ..paths import builtin_plugins_dir
+
+            builtin = builtin_plugins_dir()
+            self._builtin_root = builtin.resolve() if builtin is not None else None
+        except Exception:  # noqa: BLE001 - 拿不到不影响发现
+            self._builtin_root = None
+
+    def _source_of(self, child: Path) -> str:
+        if self._builtin_root is None:
+            return "user"
+        try:
+            return "builtin" if child.resolve().is_relative_to(self._builtin_root) else "user"
+        except OSError:  # pragma: no cover - 路径异常时按用户插件处理
+            return "user"
+
     # ---------------- 发现 ----------------
     @property
     def search_paths(self) -> list[Path]:
@@ -96,12 +119,24 @@ class PluginManager:
         清单不合法只记录日志、跳过，不抛异常：
         一个坏插件不能让整个工具箱打不开。
         **只读清单，不导入代码** —— 这就是 `DISCOVERED` 状态"零成本"的含义。
+
+        ## 重名裁决（产品化必需）
+
+        `plugin_search_paths()` 的顺序是 `[内置目录, 用户目录]`，**越靠后优先级越高**：
+
+        - 用户安装的插件**覆盖**同 id 的内置插件 —— 这是"用户升级了内置插件"的常见场景；
+        - 优先级相同（同一个目录下的两个文件夹声明同一 id）才是**真冲突**，报错并跳过后者；
+        - 同一个目录被重复扫描（界面刷新）安静跳过。
         """
-        for base in self._search_paths:
+        for index, base in enumerate(self._search_paths):
             if not base.is_dir():
                 self._log.debug("插件目录不存在，跳过: %s", base)
                 continue
             for child in sorted(base.iterdir()):
+                # 跳过隐藏目录：安装/升级用的 .staging-* 与 .backup-* 都藏在这里，
+                # 扫描时绝不能把它们当成插件（否则会看到半成品）
+                if child.name.startswith("."):
+                    continue
                 if not child.is_dir() or not (child / MANIFEST_NAME).is_file():
                     continue
                 try:
@@ -109,39 +144,61 @@ class PluginManager:
                 except Exception as exc:  # noqa: BLE001 - 单个插件的问题必须被隔离
                     self._log.error("插件清单不合法，已跳过 %s: %s", child, exc)
                     continue
+
                 existing = self._records.get(manifest.id)
                 if existing is not None:
-                    # 区分两种"重复"：
-                    # - 同一个目录被重复扫描（界面每次刷新都会发生）→ 正常，debug 级
-                    # - 不同目录声明了同一个 id → 真冲突，必须报错
-                    same_dir = (
-                        existing.manifest.path is not None
-                        and manifest.path is not None
-                        and existing.manifest.path.resolve() == manifest.path.resolve()
-                    )
-                    if same_dir:
+                    if self._is_same_dir(existing, child):
                         self._log.debug("插件已发现，跳过重复扫描: %s", manifest.id)
-                    else:
+                    elif index > existing.source_index:
+                        # 用户插件覆盖内置插件（升级内置插件的正常路径）
+                        self._log.info(
+                            "用户插件覆盖内置插件：%s %s → %s（%s）",
+                            manifest.id, existing.manifest.version, manifest.version, child,
+                        )
+                        self._records[manifest.id] = self._make_record(manifest, index, child)
+                    elif index == existing.source_index:
                         self._log.error(
-                            "插件 id 冲突：%s 与 %s 都声明了 id=%s，已跳过后者",
-                            existing.manifest.path, manifest.path, manifest.id,
+                            "插件 id 冲突：%s 与 %s 都声明了 id=%s（同一目录下），已跳过后者",
+                            existing.manifest.path, child, manifest.id,
+                        )
+                    else:
+                        self._log.debug(
+                            "插件 %s 已被更高优先级的版本覆盖，跳过 %s",
+                            manifest.id, child,
                         )
                     continue
+
                 if not is_spec_compatible(manifest.spec_version):
                     self._log.warning(
-                        "插件 %s 的清单规范版本 %s 比内核 %s 新，未知字段将被忽略",
-                        manifest.id, manifest.spec_version, self._ctx.config.get("app.spec_version", ""),
+                        "插件 %s 的清单规范版本 %s 比内核新，未知字段将被忽略",
+                        manifest.id, manifest.spec_version,
                     )
-                self._records[manifest.id] = PluginRecord(
-                    manifest=manifest,
-                    enabled=self._ctx.is_enabled(manifest),
-                )
+                self._records[manifest.id] = self._make_record(manifest, index, child)
+                record = self._records[manifest.id]
                 self._log.info(
                     "发现插件: %s v%s (%s)%s",
                     manifest.name, manifest.version, manifest.id,
-                    "" if self._records[manifest.id].enabled else " [已禁用]",
+                    "" if record.enabled else " [已禁用]",
                 )
         return self.records()
+
+    def _make_record(self, manifest: PluginManifest, index: int, child: Path) -> PluginRecord:
+        return PluginRecord(
+            manifest=manifest,
+            enabled=self._ctx.is_enabled(manifest),
+            source_index=index,
+            source=self._source_of(child),
+        )
+
+    @staticmethod
+    def _is_same_dir(record: PluginRecord, child: Path) -> bool:
+        existing_path = record.manifest.path
+        if existing_path is None:
+            return False
+        try:
+            return existing_path.resolve() == child.resolve()
+        except OSError:  # pragma: no cover
+            return False
 
     def reset(self) -> None:
         """停用并清空全部记录，用于重新扫描。"""

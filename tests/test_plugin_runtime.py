@@ -283,10 +283,33 @@ class LifecycleTests(_Base):
         self.assertEqual([r.id for r in manager.records()], ids, "重复扫描不应重复登记")
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_same_id_in_different_directories_is_a_real_conflict(self) -> None:
-        """不同目录声明同一个 id 才是真冲突，必须报错且不覆盖已发现的记录。"""
+    def test_user_plugin_overrides_builtin_with_same_id(self) -> None:
+        """用户安装的插件必须**覆盖**同 id 的内置插件。
+
+        这是"用户升级了内置插件"的正常路径：安装的新版本落在用户目录，
+        内核必须用它，而不是继续用随内核发布的老版本。
+        （曾经的真实缺陷：先扫描内置目录 + 先到先得，导致升级"看起来成功了但不生效"。）
+        """
+        fixture = self.root / "userplugins"
+        write_plugin(fixture, "hello_xbc", version="9.9.9")
+
+        manager = self.manager(fixture)
+        record = manager.get("hello_xbc")
+
+        self.assertEqual(record.manifest.version, "9.9.9")
+        self.assertEqual(record.source, "user")
+        self.assertEqual(record.manifest.path, fixture / "hello_xbc")
+
+    def test_same_id_under_one_directory_is_a_real_conflict(self) -> None:
+        """同一个搜索目录下的两个文件夹声明同一 id 才是真冲突。"""
         fixture = self.root / "fixtures"
-        write_plugin(fixture, "hello_xbc")  # 与内置插件同 id，但目录不同
+        for folder in ("first", "second"):
+            target = fixture / folder
+            target.mkdir(parents=True)
+            (target / "plugin.json").write_text(
+                json.dumps(_manifest("dup")), encoding="utf-8"
+            )
+            (target / "plugin.py").write_text(_HEALTHY_PLUGIN, encoding="utf-8")
 
         with self.assertLogs("xbc", level="ERROR") as captured:
             manager = self.manager(fixture)
@@ -295,8 +318,7 @@ class LifecycleTests(_Base):
             any("id 冲突" in record.getMessage() for record in captured.records),
             [r.getMessage() for r in captured.records],
         )
-        record = manager.get("hello_xbc")
-        self.assertEqual(record.manifest.path, BUILTIN_PLUGINS / "hello_xbc")
+        self.assertIn(manager.get("dup").manifest.path.name, {"first", "second"})
 
 
 class EnableDisableTests(_Base):

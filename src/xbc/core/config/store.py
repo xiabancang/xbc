@@ -133,6 +133,20 @@ class Config:
     def plugin_section(self, plugin_id: str) -> "PluginSettings":
         return PluginSettings(self, plugin_id)
 
+    def remove_plugin_section(self, plugin_id: str, save: bool = True) -> bool:
+        """删除某个插件的运行期配置分区（彻底卸载时用）。
+
+        返回是否真的删掉了东西。**通过本对象删除**而不是直接改文件，
+        这样内存里的副本与磁盘保持一致 —— 否则长驻宿主会拿着过期配置继续跑。
+        """
+        plugins = self._data.get("plugins")
+        if not isinstance(plugins, dict) or plugin_id not in plugins:
+            return False
+        plugins.pop(plugin_id, None)
+        if save:
+            self.save()
+        return True
+
     def __repr__(self) -> str:  # pragma: no cover - 调试用
         return f"Config(path={self.path})"
 
