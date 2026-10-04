@@ -59,14 +59,14 @@ class ShellTests(unittest.TestCase):
             any("hello_xbc" in text for text in labels), f"插件列表里没有 hello_xbc: {labels}"
         )
 
-        host.manager.start("hello_xbc")
+        host.manager.activate("hello_xbc")
         host.refresh_plugins()
 
         actions = [
             host.action_list.item(i).text() for i in range(host.action_list.count())
         ]
-        self.assertIn("hello", actions)
-        self.assertIn("probe", actions)
+        self.assertIn("hello_probe", actions)
+        self.assertIn("hello_greet", actions)
 
 
 if __name__ == "__main__":

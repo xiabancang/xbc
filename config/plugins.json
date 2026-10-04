@@ -1,0 +1,12 @@
+{
+  "_comment": "宿主层（L2）插件配置。随内核发布，升级时会被新版本替换。用户改动请写用户层。",
+  "plugins": {
+    "text_toolbox": {
+      "enabled": true,
+      "config": {
+        "strip_blank_lines": true,
+        "max_lines": 500
+      }
+    }
+  }
+}

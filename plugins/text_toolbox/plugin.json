@@ -1,0 +1,48 @@
+{
+  "id": "text_toolbox",
+  "name": "文本工具箱",
+  "version": "0.1.0",
+  "spec_version": "1.0",
+  "api_version": "1.0",
+  "entry": "plugin.py:TextToolboxPlugin",
+  "description": "纯本地文本处理：统计、去重、导出。不依赖网络，也不依赖 AI。",
+  "author": "夏半仓",
+  "capabilities": ["files", "settings", "events"],
+  "tools": [
+    {
+      "name": "text_defaults",
+      "description": "查看本插件当前生效的配置（用于验证三层配置是否按预期生效）",
+      "risk": "read"
+    },
+    {
+      "name": "text_stats",
+      "description": "统计文本的字符数、行数、词数、空行数与最长行长度",
+      "risk": "read"
+    },
+    {
+      "name": "text_dedupe",
+      "description": "按行去重并保留首次出现的顺序",
+      "risk": "read"
+    },
+    {
+      "name": "text_export",
+      "description": "按当前配置清洗文本并导出到插件数据目录",
+      "risk": "write"
+    }
+  ],
+  "skills": ["text-cleanup"],
+  "commands": [
+    {
+      "code": "text-cleanup",
+      "label": "文本清洗与统计",
+      "match": { "type": "text", "keywords": ["文本", "去重", "统计", "cleanup"] }
+    }
+  ],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "strip_blank_lines": { "type": "boolean", "default": true },
+      "max_lines": { "type": "integer", "default": 1000, "minimum": 1 }
+    }
+  }
+}

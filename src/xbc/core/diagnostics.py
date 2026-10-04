@@ -143,3 +143,75 @@ def run_checks(ctx: Any) -> dict[str, Any]:
 def exit_code(report: dict[str, Any]) -> int:
     """只有 required 项失败才算环境不可用。"""
     return 1 if report["status"] == "broken" else 0
+
+
+# ---------------- 插件运行时诊断（M9） ----------------
+
+def check_plugin_runtime(ctx: Any, manager: Any) -> dict[str, Any]:
+    """运行时诊断：插件状态分布、失败原因、缺失依赖、被遮蔽的注册。
+
+    诊断的价值在于**把被遮蔽的注册暴露出来** —— 方案 3.5 要求重名裁决
+    不能静默吞掉，用户必须能查到"我的注册为什么没生效"。
+    """
+    records = manager.records()
+    by_state: dict[str, int] = {}
+    failed: list[dict[str, str]] = []
+    blocked: list[dict[str, str]] = []
+    disabled: list[str] = []
+
+    for record in records:
+        by_state[record.state.value] = by_state.get(record.state.value, 0) + 1
+        if record.state.value == "failed":
+            failed.append({"id": record.id, "error": record.error})
+        if record.blocked_reason:
+            blocked.append({"id": record.id, "reason": record.blocked_reason})
+        if not record.enabled:
+            disabled.append(record.id)
+
+    shadowed = {
+        "tools": ctx.tool_registry.shadowed(),
+        "services": [e.to_dict() for e in ctx.service_registry.shadowed()],
+    }
+    shadowed_total = len(shadowed["tools"]) + len(shadowed["services"])
+
+    # 插件实现了、但内核没有对应契约的**可选**钩子 —— 版本错配信号
+    pending_hooks = [f"{pid}::{name}" for pid, name in ctx.hooks.check_pending()]
+
+    problems: list[str] = []
+    if failed:
+        problems.append(f"{len(failed)} 个插件处于 FAILED")
+    if shadowed_total:
+        problems.append(f"{shadowed_total} 个注册被同名注册遮蔽")
+    if pending_hooks:
+        problems.append(f"{len(pending_hooks)} 个可选钩子在当前内核上没有契约")
+
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "plugin_count": len(records),
+        "states": by_state,
+        "failed": failed,
+        "blocked": blocked,
+        "disabled": disabled,
+        "tools": len(ctx.tool_registry),
+        "skills": len(ctx.skill_catalog),
+        "services": len(ctx.service_registry),
+        "shadowed": shadowed,
+        "pending_hooks": pending_hooks,
+        "hooks": {"specs": ctx.hooks.specs},
+    }
+
+
+def doctor(ctx: Any, manager: Any) -> dict[str, Any]:
+    """完整体检 = 环境检查 + 插件运行时检查。"""
+    environment = run_checks(ctx)
+    runtime = check_plugin_runtime(ctx, manager)
+    return {
+        "environment": environment,
+        "runtime": runtime,
+        "healthy": environment["status"] != "broken" and runtime["ok"],
+    }
+
+
+def doctor_exit_code(report: dict[str, Any]) -> int:
+    return 0 if report["healthy"] else 1

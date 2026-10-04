@@ -70,6 +70,26 @@ class AppPaths:
         """用户安装的插件目录（将来插件商城的落地位置）。"""
         return self.root / "plugins"
 
+    @property
+    def user_config_dir(self) -> Path:
+        """用户层配置目录（跨版本存活，绝不覆盖）。"""
+        return self.root / "config"
+
+    @property
+    def user_plugins_config(self) -> Path:
+        """用户层的插件配置（方案 3.6 的 L3）。"""
+        return self.user_config_dir / "plugins.json"
+
+    @property
+    def secrets_file(self) -> Path:
+        """密钥文件：不进插件目录、不进仓库。"""
+        return self.user_config_dir / "secrets.json"
+
+    @property
+    def user_skills_dir(self) -> Path:
+        """用户自己的 Skill 目录。"""
+        return self.root / "skills"
+
     # ---------- 插件私有空间 ----------
     def plugin_data_dir(self, plugin_id: str) -> Path:
         return self.data_dir / assert_safe_id(plugin_id)
@@ -79,7 +99,15 @@ class AppPaths:
 
     def ensure(self) -> "AppPaths":
         """创建全部基础目录（幂等）。"""
-        for path in (self.root, self.logs_dir, self.data_dir, self.cache_dir, self.user_plugins_dir):
+        for path in (
+            self.root,
+            self.logs_dir,
+            self.data_dir,
+            self.cache_dir,
+            self.user_plugins_dir,
+            self.user_config_dir,
+            self.user_skills_dir,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         return self
 
@@ -100,4 +128,19 @@ def builtin_plugins_dir() -> Path | None:
         return candidate if candidate.is_dir() else None
 
     candidate = Path(__file__).resolve().parents[3] / "plugins"
+    return candidate if candidate.is_dir() else None
+
+
+def builtin_config_dir() -> Path | None:
+    """宿主层配置目录（随内核发布）。
+
+    源码运行时是 <仓库根>/config。打包后目录结构会变，可用
+    XBC_BUILTIN_CONFIG 显式指定；找不到时返回 None。
+    """
+    override = os.environ.get("XBC_BUILTIN_CONFIG")
+    if override and override.strip():
+        candidate = Path(override).expanduser().resolve()
+        return candidate if candidate.is_dir() else None
+
+    candidate = Path(__file__).resolve().parents[3] / "config"
     return candidate if candidate.is_dir() else None

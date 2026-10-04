@@ -1,11 +1,42 @@
 {
   "id": "hello_xbc",
   "name": "Hello XBC",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "spec_version": "1.0",
   "api_version": "1.0",
   "entry": "plugin.py:HelloXbcPlugin",
-  "description": "最小验证插件：用于验证插件生命周期与公共能力调用，本身不含业务功能。",
+  "description": "插件机制验证插件：演示生命周期、能力调用、工具与技能注册、错误隔离。本身不含业务功能。",
   "author": "夏半仓工具箱",
-  "capabilities": ["files", "settings", "ffmpeg", "ai"],
-  "actions": ["hello", "probe", "fail_on_purpose"]
+  "capabilities": ["files", "settings", "ffmpeg", "ai", "events"],
+  "tools": [
+    {
+      "name": "hello_probe",
+      "description": "报告宿主提供了哪些能力、以及当前环境是否就绪",
+      "risk": "read"
+    },
+    {
+      "name": "hello_greet",
+      "description": "生成问候文本并写入插件自己的数据目录",
+      "risk": "write"
+    },
+    {
+      "name": "hello_fail",
+      "description": "故意失败，用于验证单个插件出错不会拖垮宿主",
+      "risk": "read"
+    }
+  ],
+  "skills": ["hello-workflow"],
+  "commands": [
+    {
+      "code": "hello",
+      "label": "Hello XBC",
+      "match": { "type": "text", "keywords": ["hello", "问候"] }
+    }
+  ],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "greeting": { "type": "string", "default": "你好，夏半仓工具箱" }
+    }
+  }
 }

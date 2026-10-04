@@ -42,3 +42,15 @@ class CapabilityDenied(XbcError):
 
     这是最小权限原则的落点：manifest 里没写的能力，插件拿不到。
     """
+
+
+class ToolError(XbcError):
+    """工具相关错误的基类（未找到、参数不合法、执行失败）。"""
+
+
+class ToolNotFound(ToolError):
+    """请求的工具不存在。"""
+
+
+class SkillError(XbcError):
+    """技能相关错误的基类（未找到、正文不合法）。"""

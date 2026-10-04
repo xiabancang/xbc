@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..core.plugins.base import PluginState
+from ..core.contract.plugin import PluginState
 from ..version import APP_NAME, CORE_VERSION
 
 
@@ -145,9 +145,10 @@ class HostWindow:
     def refresh_actions(self) -> None:
         self.action_list.clear()
         record = self._selected()
-        if record is None or record.instance is None:
+        if record is None:
             return
-        for name in sorted(record.instance.actions()):
+        # 插件对外提供的是 Tool（不再是旧版的 @action）
+        for name in sorted(record.tools_registered):
             self.action_list.addItem(name)
 
     def _selected_id(self) -> str | None:
@@ -173,13 +174,13 @@ class HostWindow:
     def on_start(self) -> None:
         record = self._selected()
         if record is not None:
-            self.manager.start(record.id)
+            self.manager.activate(record.id)
             self.refresh_plugins()
 
     def on_stop(self) -> None:
         record = self._selected()
         if record is not None:
-            self.manager.stop(record.id)
+            self.manager.deactivate(record.id)
             self.refresh_plugins()
 
     def on_unload(self) -> None:
@@ -196,10 +197,13 @@ class HostWindow:
             return
         action = item.text()
         try:
-            # 先加载再启动，保证动作可调用；参数无法从界面提供，故只支持无参动作
-            self.manager.start(record.id)
-            result = self.manager.invoke(record.id, action)
-            qt.QMessageBox.information(self.window, "执行结果", f"{action}:\n{result}")
+            # 先激活再调用，保证工具已注册
+            self.manager.activate(record.id)
+            result = self.ctx.tool_registry.call(action)
+            if result.ok:
+                qt.QMessageBox.information(self.window, "执行结果", f"{action}:\n{result.value}")
+            else:
+                qt.QMessageBox.warning(self.window, "执行失败", f"{action}:\n[{result.code}] {result.message}")
         except Exception as exc:  # noqa: BLE001 - 界面只负责把错误显示出来
             qt.QMessageBox.warning(self.window, "执行失败", f"{action} 失败:\n{exc}")
         self.refresh_plugins()

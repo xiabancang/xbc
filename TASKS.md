@@ -135,15 +135,48 @@ icacls .venv /setintegritylevel '(OI)(CI)M' /T /C
 
 ---
 
+## TASK-003　实现 Plugin Runtime V1 MVP —— DONE
+
+**范围**：按方案实现 MVP。**不做 UI、不做 AI 视频、不做商城、不做云端**（用户明确约束）。
+
+**交付物**：
+- 代码：`src/xbc/core/` 共 3402 行（契约层 / 运行时 / 能力层 / 工具 / 技能 / 配置 / 上下文 / 诊断 / CLI）
+- 插件：`hello_xbc`（机制验证）、`text_toolbox`（第一个真实业务插件，纯本地文本处理）
+- 报告：[docs/plugin-runtime-v1-test-report.md](docs/plugin-runtime-v1-test-report.md)
+
+**验收对照**：
+
+| 验收标准 | 结果 |
+|---|---|
+| A1 未激活即可列出插件、不导入代码 | ✅ |
+| A2 禁用持久化（跨进程） | ✅ |
+| A3 三层配置装配与来源上报 | ✅ `config_source=host` |
+| A4 单插件失败被隔离 | ✅ |
+| A5 停用后注册无残留 | ✅ `tools=0 skills=0` |
+| A6 缺依赖保持 INACTIVE 而非报错 | ✅ |
+| A7 技能目录/按需加载 + 工具调用 | ✅ |
+| A8 参数校验返回可读错误 | ✅ `invalid_arguments` |
+| A9 全部测试通过 | ✅ **123 项 OK**（系统 Python 与 venv 均通过） |
+| A10 `doctor` 无 error | ✅ `problems=0` |
+| 安全底线 S1 能力白名单 | ✅ |
+| 安全底线 S2 内核侧风险强制 | ✅ `consent_denied` / `--yes` 授权 |
+
+**7 处与方案的偏差**已在测试报告第 2 章逐条声明（其中 D1 不做 UI、D2 不做 AI 视频 为用户指定；
+D3 配置用 JSON 而非 YAML 是为守住"内核零第三方依赖"）。
+
+**开发中发现并修复 7 个缺陷**（3 个由测试抓到），详见测试报告第 5 章。
+
+---
+
 ## 待办（尚未开始）
 
 | ID | 任务 | 前置 | 备注 |
 |---|---|---|---|
-| TASK-003 | 实现 Plugin Runtime V1 MVP | TASK-002 | 按方案第 6 章 M1–M10；**需用户先确认两个开放问题**（见方案 7 章） |
-| TASK-004 | 首个真实业务插件 `media_analyzer` | TASK-003 | V18 仅作功能参考，禁止直接修改 |
-| TASK-005 | 打包分发（PyInstaller），非技术用户可双击运行 | TASK-004 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
-| TASK-006 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
-| TASK-007 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-005 | 当前阶段明确不做 |
+| TASK-004 | 图形界面（插件管理器 + 命令面板 + 配置编辑） | TASK-003 | 方案 5.1 的 `shell/`；命令面板消费 manifest 的 `commands` 索引 |
+| TASK-005 | 首个 AI 视频类插件（把 V18 能力插件化） | TASK-003 | V18 仅作功能参考，禁止直接修改；参考 `F:\Downloads\xbc-refs\PySceneDetect` |
+| TASK-006 | 打包分发（PyInstaller） | TASK-005 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
+| TASK-007 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
+| TASK-008 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-006 | 当前阶段明确不做 |
 
 ---
 
@@ -154,3 +187,5 @@ icacls .venv /setintegritylevel '(OI)(CI)M' /T /C
 | 2026-10-04 | TASK-001 | 建立 XBC 最小内核（Core + 插件机制 + 验证插件 + 最小宿主） |
 | 2026-10-04 | TASK-001 | 恢复开发环境：环境自检、隔离环境、诊断测试 |
 | 2026-10-04 | TASK-001 | 证伪 ACL 假设；定位并修复完整性标签与日志句柄泄漏两个真实缺陷 |
+| 2026-10-04 | TASK-002 | 产出《夏半仓 Plugin Runtime 技术方案 V1》（5 个参考实地调研） |
+| 2026-10-04 | TASK-003 | 实现 Plugin Runtime V1 MVP：分层注册表、作用域、工具/技能注册表、三层配置、CLI、真实插件；123 项测试通过 |
