@@ -208,6 +208,21 @@ class ShellTests(unittest.TestCase):
         self.assertTrue(self.plugin_rows())
 
     # ---------- 选中与按钮状态 ----------
+    def test_refresh_button_does_not_log_errors(self) -> None:
+        """点「刷新」是正常操作，不该刷出 ERROR 日志。
+
+        曾经的真实 bug：长驻界面每点一次刷新，就会为每个插件刷一条
+        "插件 id 重复" 的 ERROR —— 把正常操作伪装成故障。
+        """
+        self.host.enable("text_toolbox")
+
+        with self.assertNoLogs("xbc", level="ERROR"):
+            self.host.on_refresh()
+            self.host.on_refresh()
+
+        self.assertTrue(self.plugin_rows(), "刷新后列表仍应有内容")
+        self.assertTrue(self.tool_rows(), "刷新不应丢掉已激活插件的工具")
+
     def test_selection_drives_buttons_and_detail(self) -> None:
         self.host.select_plugin("hello_xbc")
         self.assertTrue(self.host.enable_button.isEnabled())

@@ -109,8 +109,23 @@ class PluginManager:
                 except Exception as exc:  # noqa: BLE001 - 单个插件的问题必须被隔离
                     self._log.error("插件清单不合法，已跳过 %s: %s", child, exc)
                     continue
-                if manifest.id in self._records:
-                    self._log.error("插件 id 重复，已跳过 %s（id=%s）", child, manifest.id)
+                existing = self._records.get(manifest.id)
+                if existing is not None:
+                    # 区分两种"重复"：
+                    # - 同一个目录被重复扫描（界面每次刷新都会发生）→ 正常，debug 级
+                    # - 不同目录声明了同一个 id → 真冲突，必须报错
+                    same_dir = (
+                        existing.manifest.path is not None
+                        and manifest.path is not None
+                        and existing.manifest.path.resolve() == manifest.path.resolve()
+                    )
+                    if same_dir:
+                        self._log.debug("插件已发现，跳过重复扫描: %s", manifest.id)
+                    else:
+                        self._log.error(
+                            "插件 id 冲突：%s 与 %s 都声明了 id=%s，已跳过后者",
+                            existing.manifest.path, manifest.path, manifest.id,
+                        )
                     continue
                 if not is_spec_compatible(manifest.spec_version):
                     self._log.warning(

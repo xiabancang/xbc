@@ -267,6 +267,37 @@ class LifecycleTests(_Base):
         manager = self.manager(fixture)
         self.assertNotIn("bad_manifest", [r.id for r in manager.records()])
 
+    def test_repeated_discover_is_quiet_and_idempotent(self) -> None:
+        """重复扫描不是冲突：界面每次刷新都会 discover，不能刷出 ERROR 日志。
+
+        曾经的真实 bug：长驻宿主每次刷新都会为每个插件刷一条
+        "插件 id 重复" 的 ERROR，把正常操作伪装成故障。
+        """
+        manager = self.manager()
+        ids = [r.id for r in manager.records()]
+
+        with self.assertNoLogs("xbc", level="ERROR"):
+            manager.discover()
+            manager.discover()
+
+        self.assertEqual([r.id for r in manager.records()], ids, "重复扫描不应重复登记")
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_same_id_in_different_directories_is_a_real_conflict(self) -> None:
+        """不同目录声明同一个 id 才是真冲突，必须报错且不覆盖已发现的记录。"""
+        fixture = self.root / "fixtures"
+        write_plugin(fixture, "hello_xbc")  # 与内置插件同 id，但目录不同
+
+        with self.assertLogs("xbc", level="ERROR") as captured:
+            manager = self.manager(fixture)
+
+        self.assertTrue(
+            any("id 冲突" in record.getMessage() for record in captured.records),
+            [r.getMessage() for r in captured.records],
+        )
+        record = manager.get("hello_xbc")
+        self.assertEqual(record.manifest.path, BUILTIN_PLUGINS / "hello_xbc")
+
 
 class EnableDisableTests(_Base):
     def test_disable_persists_across_restart(self) -> None:
