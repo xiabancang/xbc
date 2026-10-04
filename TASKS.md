@@ -402,11 +402,74 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 
 ---
 
+## TASK-008　AI Capability 首次真实消费：vision 定向提问 + video_analyzer 接入 —— DONE
+
+**定位**：不是给 video_analyzer 加业务功能，而是**验证 TASK-007 的接口设计是否可用**。
+
+**范围与约束**：Core 只允许扩展 `vision_analyze` 一处；扩展必须向后兼容；
+视频业务逻辑全留在插件内；不做任何"为将来预留"的扩展点。
+
+**实现**：
+
+| # | 任务书要求 | 实现 |
+|---|---|---|
+| 1 | `vision_analyze` 新增 `question`（唯一 Core 改动） | 新增 `VisionAnswer` 类型；`vision_prompt()` 按模式出提示词；`parse_vision_payload(field=...)` 增加默认参数保证原行为不变 |
+| 2 | video_analyzer 接入 AI Capability | 新增工具 `video_annotate`：镜头切分 → 抽关键帧 → 逐帧 `ctx.ai.vision_analyze(question=...)` → 按镜头汇总标签 |
+| 3 | 报告接口设计反馈 | 报告第 8 节（本任务核心产出） |
+
+**两种模式用两个类型，不用同一字段承载两种语义**：
+
+| 模式 | 入参 | 返回 | 承载答案的字段 |
+|---|---|---|---|
+| 描述 | 不传 `question` | `VisionResult` | `description` |
+| 定向提问 | 传 `question` | `VisionAnswer` | `answer` |
+
+**验收对照（7/7 通过）**：
+
+| # | 验收标准 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | 不带 question 与 TASK-007 一致；带 question 返回 `{answer, labels}` | ✅ | TASK-007 的 80 项测试**一条未改全部通过**；真机两种模式字段集合已列出 |
+| 2 | video_analyzer 真实跑通，每镜头带 AI 标签 | ✅ | 6 秒真实 MP4 / 3 镜头；**3 组标签互不相同**（真 Ollama） |
+| 3 | 插件无直接模型调用（grep + ast） | ✅ | 两插件：大小写不敏感 grep 0 命中、ast 0 命中 |
+| 4 | Core 无业务耦合 | ✅ | 18 条业务词表扫描 `capabilities/ai/` 0 命中；`FRAME_QUESTION` 只在插件里 |
+| 5 | Core 改动范围锁定 | ✅ | 17 个非 vision 代码单元 + 37 个 AI 层外文件**哈希零变化** |
+| 6 | 全部测试通过 | ✅ | `Ran 305 tests ... OK`，双环境 |
+| 7 | 报告含「接口可用性反馈」 | ✅ | 报告第 8 节，含"是否需要返工"的明确结论 |
+
+**真实链路记录**（本机 Ollama `qwen2.5vl:3b`）：
+
+```
+输入  distinct_scenes.mp4  6.0s 320x240 437807 字节（mandelbrot / smptebars / life 三段）
+镜头0 [0,2) 回答"复杂的几何图形，属于抽象艺术场景"  标签 几何图形/抽象艺术/复杂图案/色彩斑斓…
+镜头1 [2,4) 回答"测试画面"                        标签 测试画面/彩色条纹/电视测试/色彩校准…
+镜头2 [4,6) 回答"主要内容是星空，属于夜空场景"      标签 星空/夜空/宇宙/天体/天文…
+标签集合互不相同 3/3 组 —— 来自对各自画面的理解，非硬编码
+耗时：首次 33.0s（模型冷加载），模型常驻后 2.1s
+```
+
+**接口可用性反馈结论**：**不需要返工**。理由与 3 处可改进项见报告第 8 节。
+按任务书要求**未私自改 Core 接口**，改进项只记录待裁决。
+
+**本轮修的真缺陷**：
+
+1. **TASK-007 的字面 grep 是大小写敏感的** —— `video_analyzer` 文档字符串里的
+   「不接 **Ollama**」（大写 O）躲过了检查。本任务做真实接入时发现：
+   改掉该措辞 + 新增大小写不敏感扫描测试。
+2. **`test_video_analyzer.py` 硬编码工具数与能力集** —— 插件加一个工具后 3 条测试假失败。
+   改为从清单推导，并新增"声明了 ai 就必须真能拿到"的测试。
+
+**范围外只报告**：全量 `plugins/` 大小写不敏感扫描会命中
+`plugins/knowledge_base/plugin.py`（含 `ollama`，但无真实 import）。
+该插件非本任务产物，**未修改**。
+
+📄 完整报告：[docs/task-008-ai-capability-first-consumption-report.md](docs/task-008-ai-capability-first-consumption-report.md)
+
+---
+
 ## 待办（尚未开始）
 
 | ID | 任务 | 前置 | 备注 |
 |---|---|---|---|
-| TASK-008 | 在 video_analyzer 上增加 AI 理解（镜头级视觉理解） | TASK-005 / 007 | 合并两者的插件：FFmpeg 出关键帧 → `ctx.ai.vision_analyze` |
 | TASK-009 | 图形界面二期：插件安装/卸载入口 + 配置编辑 | TASK-006 | 安装器是纯数据操作，界面直接调 `create_installer()` |
 | TASK-010 | 打包分发（PyInstaller） | TASK-008 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
 | TASK-011 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
@@ -428,3 +491,4 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 | 2026-10-04 | 修复 | 重复扫描被误报为"插件 id 重复"错误（长驻界面每点一次刷新就刷一屏 ERROR） |
 | 2026-10-04 | TASK-006 | 插件产品化基础：`.xbcplugin` 包格式（含 zip-slip 防护）、安装/卸载/升级、SemVer 版本比较、安装台账、用户数据目录分离；修 3 个真缺陷（其中"升级不生效"直接卡验收）；测试增至 203 项 |
 | 2026-10-05 | TASK-007 | AI Capability Layer V1（按规格对齐版）：`AIService` + `ModelProvider` + Request/Response 结构；`providers/`（ollama / openai_compatible）；`text_generate` / `vision_analyze`（结构化 description+labels）/ `embedding`（dim）；配置 `ai.provider`/`ai.model`/`ai.options`；验收插件 `ai_test_plugin`（单工具 `ai_selftest`）；**删除 Provider 注册表**（原则 6）；修 9 个真缺陷；测试增至 283 项；产出《AI Capability Layer V1 测试报告》 |
+| 2026-10-05 | TASK-008 | AI Capability 首次真实消费：`vision_analyze` 新增 `question`（向后兼容，返回 `VisionAnswer{answer,labels}`）；video_analyzer 新增 `video_annotate`（关键帧 → `ctx.ai` → 逐镜头标签）；Core 改动锁定（17 单元 + 37 文件哈希零变化）；修 2 个真缺陷（含 TASK-007 大小写敏感 grep 漏洞）；测试增至 305 项；产出《TASK-008 交付报告》含接口可用性反馈 |

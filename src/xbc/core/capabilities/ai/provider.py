@@ -69,7 +69,12 @@ class ModelProvider(ABC):
     def text_generate(self, request: TextRequest) -> TextResult:
         raise AIUnsupported(f"Provider {self.name!r} 不支持文本生成（text_generate）")
 
-    def vision_analyze(self, request: VisionRequest) -> VisionResult:
+    def vision_analyze(self, request: VisionRequest) -> Any:
+        """视觉理解。
+
+        不传 `request.question` → 返回 `VisionResult`（`description` + `labels`）；
+        传了 → 返回 `VisionAnswer`（`answer` + `labels`）。
+        """
         raise AIUnsupported(f"Provider {self.name!r} 不支持视觉理解（vision_analyze）")
 
     def embedding(self, request: EmbeddingRequest) -> EmbeddingResult:
@@ -113,11 +118,36 @@ _VISION_PROMPT = (
     "要求：description 用一到三句话描述画面内容；labels 给出 3 到 8 个简短标签。"
 )
 
+#: 定向提问模式的提示词前缀。问题原文接在后面。
+#:
+#: 用拼接而不是 `str.format()`：调用方的问题里可能出现花括号，
+#: 那会让格式化直接抛异常。
+_VISION_QUESTION_PROMPT_HEAD = (
+    "请根据这张图片回答问题，并**只**输出一个 JSON 对象，不要输出任何其他文字或代码块标记。\n"
+    '格式：{"answer": "对问题的回答", "labels": ["标签1", "标签2"]}\n'
+    "要求：answer 直接回答下面的问题；labels 给出 3 到 8 个与画面相关的简短标签。\n"
+    "问题："
+)
 
-def parse_vision_payload(text: str) -> tuple[str, list[str]]:
-    """把模型输出解析成 `(description, labels)`。
 
-    **容错优先**：模型没给出合法 JSON 时，把整段文本当作 description，labels 置空 ——
+def vision_prompt(question: str | None = None) -> str:
+    """按模式给出内置提示词。
+
+    - 不给 `question`：描述模式，要求输出 `description` + `labels`
+    - 给了 `question`：定向提问模式，要求输出 `answer` + `labels`
+    """
+    if question:
+        return _VISION_QUESTION_PROMPT_HEAD + question
+    return _VISION_PROMPT
+
+
+def parse_vision_payload(text: str, *, field: str = "description") -> tuple[str, list[str]]:
+    """把模型输出解析成 `(正文, labels)`。
+
+    `field` 指定正文取 JSON 里的哪个键：描述模式用 `description`（默认），
+    定向提问模式用 `answer`。默认值保证 TASK-007 的调用行为完全不变。
+
+    **容错优先**：模型没给出合法 JSON 时，把整段文本当作正文，labels 置空 ——
     而不是抛错让整条链路失败。视觉是"给人的信息"，降级比失败更有用。
     """
     raw = (text or "").strip()
@@ -144,9 +174,9 @@ def parse_vision_payload(text: str) -> tuple[str, list[str]]:
     if not isinstance(data, dict):
         return raw, []
 
-    description = data.get("description")
-    if not isinstance(description, str) or not description.strip():
-        description = raw
+    body = data.get(field)
+    if not isinstance(body, str) or not body.strip():
+        body = raw
 
     labels: list[str] = []
     raw_labels = data.get("labels")
@@ -156,7 +186,7 @@ def parse_vision_payload(text: str) -> tuple[str, list[str]]:
             if text_item and text_item not in labels:
                 labels.append(text_item)
 
-    return description.strip(), labels
+    return body.strip(), labels
 
 
 # ---------------- 共用工具 ----------------
@@ -300,4 +330,5 @@ __all__ = [
     "parse_vision_payload",
     "probe_available",
     "request_json",
+    "vision_prompt",
 ]

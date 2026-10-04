@@ -19,13 +19,13 @@ from typing import Any
 
 from ..provider import (
     ModelProvider,
-    _VISION_PROMPT,
     base_url,
     encode_image,
     get_json,
     parse_vision_payload,
     probe_available,
     request_json,
+    vision_prompt,
 )
 from ..request import EmbeddingRequest, TextRequest, VisionRequest
 from ..types import (
@@ -34,6 +34,7 @@ from ..types import (
     AIUnavailable,
     EmbeddingResult,
     TextResult,
+    VisionAnswer,
     VisionResult,
 )
 
@@ -181,14 +182,26 @@ class OllamaProvider(ModelProvider):
             request.prompt, system=request.system, images=None, model=model, json_mode=False
         )
 
-    def vision_analyze(self, request: VisionRequest) -> VisionResult:
+    def vision_analyze(self, request: VisionRequest) -> VisionResult | VisionAnswer:
+        """描述模式返回 `VisionResult`，定向提问模式返回 `VisionAnswer`。"""
         if not request.images:
             raise AIResponseError("vision_analyze 至少需要一张本地图片路径")
         model = self._require_model(self.model)
         generated = self._generate(
-            _VISION_PROMPT, system=None, images=list(request.images),
+            vision_prompt(request.question), system=None, images=list(request.images),
             model=model, json_mode=True,
         )
+        if request.question:
+            answer, labels = parse_vision_payload(generated.text, field="answer")
+            return VisionAnswer(
+                question=request.question,
+                answer=answer,
+                labels=labels,
+                provider=self.name,
+                model=generated.model,
+                raw=generated.text,
+                usage=generated.usage,
+            )
         description, labels = parse_vision_payload(generated.text)
         return VisionResult(
             description=description,

@@ -1,13 +1,13 @@
 {
   "id": "video_analyzer",
   "name": "视频分析器",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "spec_version": "1.0",
   "api_version": "1.0",
   "entry": "plugin.py:VideoAnalyzerPlugin",
-  "description": "基于 FFmpeg 的本地视频分析：读取媒体信息、按画面变化切分镜头、抽取关键帧。不依赖 AI、不联网。",
+  "description": "本地视频分析：FFmpeg 读取媒体信息、按画面变化切分镜头、抽取关键帧；画面理解经 AI 能力层完成，插件不直接接触模型。",
   "author": "夏半仓",
-  "capabilities": ["files", "ffmpeg", "settings"],
+  "capabilities": ["files", "ffmpeg", "settings", "ai"],
   "tools": [
     {
       "name": "video_probe",
@@ -22,6 +22,11 @@
     {
       "name": "video_extract_keyframes",
       "description": "为每个镜头抽取关键帧并保存到插件数据目录，返回帧文件清单",
+      "risk": "read"
+    },
+    {
+      "name": "video_annotate",
+      "description": "关键帧 → AI 理解 → 标签：为每个镜头产出 AI 生成的标签与画面结论",
       "risk": "read"
     },
     {
@@ -49,6 +54,13 @@
         "default": 3,
         "minimum": 1,
         "maximum": 20
+      },
+      "annotate_frames_per_shot": {
+        "type": "integer",
+        "default": 1,
+        "minimum": 1,
+        "maximum": 4,
+        "description": "每个镜头送去做 AI 理解的关键帧数量。AI 调用较慢，默认每镜头 1 帧。"
       },
       "max_shots": {
         "type": "integer",

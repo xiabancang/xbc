@@ -55,8 +55,8 @@ XBC/
 ├─ plugins/                  内置插件
 │  ├─ hello_xbc/             机制验证插件
 │  ├─ text_toolbox/          真实业务插件：纯本地文本处理
-│  └─ video_analyzer/        真实业务插件：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取
-├─ tests/                    283 项测试
+│  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + 经 ctx.ai 的镜头级画面理解
+├─ tests/                    305 项测试
 └─ docs/                     技术方案、测试报告、调研报告
 ```
 
@@ -98,6 +98,9 @@ python run.py skill load text-cleanup
 # 需要先在 config.json 里设置 ai.model（Core 不写死任何模型名）
 python run.py tool call ai_selftest --kwargs "{\"prompt\": \"用一句话介绍你自己\"}"
 
+# 关键帧 → AI 理解 → 逐镜头标签（video_analyzer，走同一个 ctx.ai）
+python run.py tool call video_annotate --kwargs "{\"path\": \"D:/clip.mp4\"}"
+
 # 桌面管理入口（插件列表/状态、启用停用、Tool 与 Skill 列表）
 python run.py ui
 ```
@@ -105,7 +108,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 283 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 305 tests / OK
 ```
 
 ---
@@ -332,12 +335,12 @@ python -m venv .venv
 |---|---|---|
 | `hello_xbc` | 机制验证（生命周期、能力、错误隔离） | `hello_probe` / `hello_greet` / `hello_fail` |
 | `text_toolbox` | 真实业务：纯本地文本处理 | `text_defaults` / `text_stats` / `text_dedupe` / `text_export` |
-| `video_analyzer` | 真实业务：基于 FFmpeg 的视频结构分析 | `video_probe` / `video_split_shots` / `video_extract_keyframes` / `video_analyze` |
+| `video_analyzer` | 业务：FFmpeg 结构分析 + 经 `ctx.ai` 的镜头级画面理解 | `video_probe` / `video_split_shots` / `video_extract_keyframes` / `video_annotate` / `video_analyze` |
 | `ai_test_plugin` | 验收 AI 能力层：只通过 `ctx.ai` 说话 | `ai_selftest` |
 
 ### video_analyzer
 
-只用 FFmpeg，**不含 AI、不联网、零第三方依赖**：
+**结构层用 FFmpeg，理解层走 `ctx.ai`** —— 插件不 import 任何模型 SDK 或网络库：
 
 ```powershell
 # 读取媒体信息
@@ -349,6 +352,9 @@ python run.py tool call video_split_shots --kwargs "{`"path`": `"D:/clip.mp4`", 
 # 抽取关键帧（写入插件自己的数据目录）
 python run.py tool call video_extract_keyframes --kwargs "{`"path`": `"D:/clip.mp4`", `"frames_per_shot`": 3}"
 
+# 关键帧 → AI 理解 → 逐镜头标签（走 ctx.ai 的定向提问模式）
+python run.py tool call video_annotate --kwargs "{`"path`": `"D:/clip.mp4`"}"
+
 # 一次拿到完整结构
 python run.py tool call video_analyze --kwargs "{`"path`": `"D:/clip.mp4`"}"
 ```
@@ -357,7 +363,7 @@ python run.py tool call video_analyze --kwargs "{`"path`": `"D:/clip.mp4`"}"
 > 或 `cmd /c "python run.py ... --kwargs \"{...}\""`。
 
 可配置项（用户层配置 `config/plugins.json`）：`scene_threshold`、`min_shot_seconds`、
-`keyframes_per_shot`、`max_shots`、`frame_width`。
+`keyframes_per_shot`、`annotate_frames_per_shot`、`max_shots`、`frame_width`。
 
 ---
 
@@ -367,20 +373,25 @@ AI 是 **Core Capability**，位于 `src/xbc/core/capabilities/ai/`：
 插件通过 `ctx.ai` 使用，**不允许**直接调模型、直接发 HTTP、直接 import 某个模型的 SDK。
 这条不是口号 —— 有测试对 `plugins/` 做**字面 grep**与 `ast` 双重扫描，出现即失败。
 
-> 完整验收结果见 [《AI Capability Layer V1 测试报告》](docs/ai-capability-v1-test-report.md)。
+> 完整验收结果见 [《AI Capability Layer V1 测试报告》](docs/ai-capability-v1-test-report.md)
+> 与 [《TASK-008 交付报告》（首次真实消费 + 接口可用性反馈）](docs/task-008-ai-capability-first-consumption-report.md)。
 
 ### 三个能力入口
 
 ```python
 ctx.ai.text_generate("写一句自我介绍")      # → TextResult(text, usage, provider, model)
 ctx.ai.vision_analyze("D:/pic.png")         # → VisionResult(description, labels, ...)
+ctx.ai.vision_analyze("D:/pic.png", question="画面里有几个人？")
+                                            # → VisionAnswer(answer, labels, question, ...)
 ctx.ai.embedding(["第一段", "第二段"])       # → EmbeddingResult(vectors, dim, provider, model)
 ```
 
 几个刻意的设计：
 
-- **`vision_analyze` 返回结构化结果**（`description` + `labels`），不是一段字符串 ——
+- **`vision_analyze` 返回结构化结果**，不是一段字符串 ——
   否则每个插件都要自己去解析模型的自然语言，等于把提示词工程推给所有人。
+- **视觉有两种模式，返回两种类型**：不传 `question` 走描述模式（`description` + `labels`），
+  传了走定向提问模式（`answer` + `labels`）。**不用同一个字段承载两种语义**。
 - **`vision_analyze` 只接受本地图片路径**：不接受 base64、不接受 URL。传错形态会明确报错。
 - 结果都带 `provider` / `model`，出问题时能说清**是谁生成的**。
 

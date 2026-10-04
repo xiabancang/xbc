@@ -58,10 +58,12 @@ from xbc.core.capabilities.ai import (  # noqa: E402
     OpenAICompatibleProvider,
     TextRequest,
     TextResult,
+    VisionAnswer,
     VisionRequest,
     VisionResult,
     build_ai_service,
     parse_vision_payload,
+    vision_prompt,
 )
 from xbc.core.capabilities.ai.provider import base_url  # noqa: E402
 from xbc.core.config.layers import write_json  # noqa: E402
@@ -79,6 +81,28 @@ PNG_1PX = base64.b64decode(
 )
 
 VISION_JSON = '{"description": "画面里有一个黑色方块与彩色条纹", "labels": ["方块", "条纹", "测试图"]}'
+#: 定向提问模式的模型回复
+VISION_ANSWER = '{"answer": "画面里有一个黑色方块与彩色条纹", "labels": ["方块", "条纹"]}'
+
+#: 定向提问提示词里的分隔标记，mock 用它判断本次是哪一种模式
+QUESTION_MARKER = "问题："
+
+
+def prompt_text(payload: dict) -> str:
+    """从两类协议的请求体里取出提示词原文。"""
+    if "prompt" in payload:
+        return str(payload["prompt"])
+    messages = payload.get("messages") or []
+    if not messages:
+        return ""
+    content = messages[-1].get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(part.get("text", "")) for part in content if isinstance(part, dict)
+        )
+    return ""
 
 #: 验收第 5 条：插件里不允许出现的直接引用
 FORBIDDEN_IN_PLUGINS = [
@@ -104,6 +128,7 @@ class MockModelServer:
         self.requests: list[dict] = []
         self.text_reply = "这是假模型的回答"
         self.vision_reply = VISION_JSON
+        self.answer_reply = VISION_ANSWER
         self.embedding = [0.1, 0.2, 0.3, 0.4]
         self.fail_with: int | None = None
         self.fail_body: dict | None = None
@@ -151,8 +176,14 @@ class MockModelServer:
 
                 if self.path == "/api/generate":
                     wants_json = payload.get("format") == "json"
+                    if not wants_json:
+                        reply = owner.text_reply
+                    elif QUESTION_MARKER in prompt_text(payload):
+                        reply = owner.answer_reply
+                    else:
+                        reply = owner.vision_reply
                     self._json({
-                        "response": owner.vision_reply if wants_json else owner.text_reply,
+                        "response": reply,
                         "model": payload.get("model"),
                         "eval_count": 7,
                         "prompt_eval_count": 11,
@@ -167,13 +198,16 @@ class MockModelServer:
                     self._json({"embedding": list(owner.embedding)})
                 elif self.path.endswith("/chat/completions"):
                     wants_json = "response_format" in payload
+                    if not wants_json:
+                        reply = owner.text_reply
+                    elif QUESTION_MARKER in prompt_text(payload):
+                        reply = owner.answer_reply
+                    else:
+                        reply = owner.vision_reply
                     self._json({
                         "model": payload.get("model"),
                         "choices": [{
-                            "message": {
-                                "role": "assistant",
-                                "content": owner.vision_reply if wants_json else owner.text_reply,
-                            },
+                            "message": {"role": "assistant", "content": reply},
                             "finish_reason": "stop",
                         }],
                         "usage": {"prompt_tokens": 11, "completion_tokens": 7},
@@ -251,8 +285,16 @@ class StubProvider(ModelProvider):
         self.seen.append(request)
         return TextResult(text=f"[{self.name}] {request.prompt}", provider=self.name, model="stub")
 
-    def vision_analyze(self, request: VisionRequest) -> VisionResult:
+    def vision_analyze(self, request: VisionRequest) -> VisionResult | VisionAnswer:
         self.seen.append(request)
+        if request.question:
+            return VisionAnswer(
+                question=request.question,
+                answer=f"[{self.name}] 回答：{request.question}",
+                labels=["stub"],
+                provider=self.name,
+                model="stub",
+            )
         return VisionResult(
             description=f"[{self.name}] {len(request.images)} 张图",
             labels=["stub"],
@@ -379,6 +421,113 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(result.count, 2)
         self.assertEqual(result.to_dict()["dim"], 2)
         self.assertEqual(EmbeddingResult(vectors=[]).dim, 0, "空结果维度为 0，不是异常")
+
+
+class VisionQuestionModeTests(unittest.TestCase):
+    """TASK-008：`vision_analyze` 的定向提问模式。
+
+    两条硬要求：
+
+    1. **向后兼容** —— 不传 `question` 时行为与 TASK-007 完全一致；
+    2. **两种模式的返回结构明确区分** —— 不用同一个字段承载两种语义。
+    """
+
+    def stub(self) -> tuple[AIService, StubProvider]:
+        service = AIService()
+        provider = StubProvider("s", {AICapability.VISION})
+        service.register(provider)
+        return service, provider
+
+    # ---------- 向后兼容 ----------
+    def test_without_question_returns_description_result(self) -> None:
+        service, _ = self.stub()
+        result = service.vision_analyze(["a.png"])
+        self.assertIsInstance(result, VisionResult)
+        self.assertNotIsInstance(result, VisionAnswer)
+        self.assertTrue(result.description)
+        self.assertEqual(result.labels, ["stub"])
+
+    def test_question_defaults_to_none(self) -> None:
+        service, provider = self.stub()
+        service.vision_analyze(["a.png"])
+        self.assertIsNone(provider.seen[-1].question, "不传 question 时应为 None")
+
+    # ---------- 定向提问模式 ----------
+    def test_with_question_returns_answer_result(self) -> None:
+        service, provider = self.stub()
+        result = service.vision_analyze(["a.png"], question="画面里有几个人？")
+
+        self.assertIsInstance(result, VisionAnswer)
+        self.assertNotIsInstance(result, VisionResult)
+        self.assertEqual(result.question, "画面里有几个人？")
+        self.assertIn("画面里有几个人？", result.answer, "answer 应与问题相关")
+        self.assertEqual(result.labels, ["stub"])
+        self.assertEqual(provider.seen[-1].question, "画面里有几个人？")
+
+    # ---------- 两种结构必须区分 ----------
+    def test_two_modes_use_different_field_names(self) -> None:
+        service, _ = self.stub()
+        described = service.vision_analyze(["a.png"]).to_dict()
+        answered = service.vision_analyze(["a.png"], question="这是什么？").to_dict()
+
+        self.assertIn("description", described)
+        self.assertNotIn("answer", described, "描述模式不该出现 answer 字段")
+
+        self.assertIn("answer", answered)
+        self.assertNotIn("description", answered, "提问模式不该出现 description 字段")
+        self.assertIn("question", answered, "提问模式应回显问题，便于归因")
+
+        # 共有字段（labels / provider / model / usage）两边一致
+        self.assertEqual(set(described) & set(answered), {"labels", "provider", "model", "raw", "usage"})
+
+    def test_two_modes_are_different_types(self) -> None:
+        self.assertIsNot(VisionResult, VisionAnswer)
+        service, _ = self.stub()
+        self.assertNotIsInstance(service.vision_analyze(["a.png"]), VisionAnswer)
+        self.assertNotIsInstance(
+            service.vision_analyze(["a.png"], question="q"), VisionResult
+        )
+
+    # ---------- 提示词 ----------
+    def test_prompt_differs_between_modes(self) -> None:
+        describe_prompt = vision_prompt()
+        question_prompt = vision_prompt("画面里有几个人？")
+
+        self.assertNotEqual(describe_prompt, question_prompt)
+        self.assertIn('"description"', describe_prompt)
+        self.assertIn('"answer"', question_prompt)
+        self.assertIn("画面里有几个人？", question_prompt)
+        self.assertNotIn("画面里有几个人？", describe_prompt)
+
+    def test_question_with_braces_does_not_break_prompt(self) -> None:
+        """问题里出现花括号不能让提示词构造炸掉（用拼接而不是 str.format）。"""
+        prompt = vision_prompt("描述这个 {奇怪的} 画面 {0}")
+        self.assertIn("{奇怪的}", prompt)
+        self.assertIn("{0}", prompt)
+
+    # ---------- 解析 ----------
+    def test_parse_answer_field(self) -> None:
+        body, labels = parse_vision_payload(
+            '{"answer": "有两个人", "labels": ["人", "室内"]}', field="answer"
+        )
+        self.assertEqual(body, "有两个人")
+        self.assertEqual(labels, ["人", "室内"])
+
+    def test_parse_answer_falls_back_to_raw(self) -> None:
+        body, labels = parse_vision_payload("模型没给 JSON", field="answer")
+        self.assertEqual(body, "模型没给 JSON")
+        self.assertEqual(labels, [])
+
+    def test_parse_default_field_is_unchanged(self) -> None:
+        """默认仍是 description —— TASK-007 的调用方行为不变。"""
+        body, _ = parse_vision_payload('{"description": "一只猫", "labels": ["猫"]}')
+        self.assertEqual(body, "一只猫")
+
+    def test_request_to_dict_carries_question(self) -> None:
+        request = VisionRequest(images=["a.png"], question="这是什么？")
+        data = request.to_dict()
+        self.assertEqual(data["question"], "这是什么？")
+        self.assertEqual(data["images"], ["a.png"])
 
 
 class VisionPayloadTests(unittest.TestCase):
@@ -527,6 +676,21 @@ class OllamaProviderTests(_ServerBase):
         sent = self.server.last("/api/generate")["payload"]
         self.assertEqual(sent["format"], "json", "视觉必须要求 JSON 输出，否则拿不到 labels")
         self.assertEqual(base64.b64decode(sent["images"][0]), PNG_1PX)
+
+    def test_vision_question_mode_returns_answer(self) -> None:
+        image = self.png()
+        result = self.provider().vision_analyze(
+            VisionRequest(images=[str(image)], question="画面里有什么颜色？")
+        )
+
+        self.assertIsInstance(result, VisionAnswer)
+        self.assertEqual(result.question, "画面里有什么颜色？")
+        self.assertEqual(result.answer, "画面里有一个黑色方块与彩色条纹")
+        self.assertEqual(result.labels, ["方块", "条纹"])
+
+        sent = self.server.last("/api/generate")["payload"]
+        self.assertIn("画面里有什么颜色？", sent["prompt"], "问题必须出现在发给模型的提示词里")
+        self.assertEqual(sent["format"], "json")
 
     def test_vision_rejects_network_url(self) -> None:
         with self.assertRaises(AIError) as ctx:
@@ -784,6 +948,23 @@ class OpenAIProviderTests(_ServerBase):
         self.assertTrue(url.startswith("data:image/"), url[:40])
         self.assertEqual(base64.b64decode(url.split(",", 1)[1]), PNG_1PX)
 
+    def test_vision_question_mode_returns_answer(self) -> None:
+        image = self.png()
+        result = self.provider().vision_analyze(
+            VisionRequest(images=[str(image)], question="画面里有什么颜色？")
+        )
+
+        self.assertIsInstance(result, VisionAnswer)
+        self.assertEqual(result.answer, "画面里有一个黑色方块与彩色条纹")
+        self.assertEqual(result.labels, ["方块", "条纹"])
+
+        sent = self.server.last("/chat/completions")["payload"]
+        text = " ".join(
+            part.get("text", "") for part in sent["messages"][-1]["content"]
+            if isinstance(part, dict)
+        )
+        self.assertIn("画面里有什么颜色？", text)
+
     def test_embedding(self) -> None:
         result = self.provider().embedding(EmbeddingRequest(texts=["一段", "二段"]))
         sent = self.server.last("/embeddings")
@@ -967,6 +1148,140 @@ class AITestPluginTests(unittest.TestCase):
         self.assertEqual(results[0][2], results[1][2], "EmbeddingResult 字段不一致")
 
 
+# ================= TASK-008：AI Capability 的第一次真实消费 =================
+
+
+try:  # 两种调用方式（`tests.` 包 与 直接 discover）都要能导入
+    from tests.test_video_analyzer import EXPECTED_DURATION, make_test_video
+except ImportError:  # pragma: no cover
+    from test_video_analyzer import EXPECTED_DURATION, make_test_video
+
+
+class VideoAnalyzerConsumesAICapabilityTests(unittest.TestCase):
+    """video_analyzer 通过 `ctx.ai` 完成「关键帧 → AI 理解 → 标签」。
+
+    用本地 mock 服务替代真模型，验证的是**链路与数据流**：
+    标签确实来自 AI 返回，插件侧没有任何硬编码映射。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.fixture_dir = Path(tempfile.mkdtemp(prefix="xbc-va-ai-"))
+        cls.video = cls.fixture_dir / "scenes.mp4"
+        cls.video_ready = make_test_video(cls.video)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.fixture_dir, ignore_errors=True)
+
+    def setUp(self) -> None:
+        if not self.video_ready:
+            self.skipTest("无法合成测试视频（FFmpeg 不可用或编码器缺失）")
+        self.server = MockModelServer()
+        self.addCleanup(self.server.stop)
+        self.root = Path(tempfile.mkdtemp(prefix="xbc-va-ai-home-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def make_context(self) -> AppContext:
+        paths = AppPaths(self.root).ensure()
+        write_json(paths.secrets_file, {"mock_api_key": "sk-mock-abcdef"})
+        ctx = AppContext.create(
+            root=self.root,
+            console=False,
+            overrides={
+                "ai.provider": "openai_compatible",
+                "ai.model": "mock-text",
+                "ai.embedding_model": "mock-embed",
+                "ai.options": {"timeout": 30},
+                "ai.openai_compatible.base_url": f"{self.server.url}/v1",
+                "ai.openai_compatible.api_key_secret": "mock_api_key",
+            },
+        )
+        self.addCleanup(ctx.close)
+        manager = PluginManager(ctx, [PLUGINS_DIR], ctx.logger)
+        manager.discover()
+        manager.activate("video_analyzer")
+        self.manager = manager
+        return ctx
+
+    def annotate(self, ctx: AppContext, **arguments):
+        return ctx.tool_registry.call("video_annotate", {"path": str(self.video), **arguments})
+
+    # ---------- 链路 ----------
+    def test_annotate_returns_ai_labels_per_shot(self) -> None:
+        ctx = self.make_context()
+        result = self.annotate(ctx)
+
+        self.assertTrue(result.ok, result.message)
+        value = result.value
+        self.assertEqual(value["shot_count"], 3, "测试视频应切出 3 个镜头")
+        self.assertEqual(value["frames_analyzed"], 3, "默认每镜头 1 帧")
+        self.assertEqual(value["errors"], [])
+        self.assertEqual(value["ai"]["provider"], "openai_compatible")
+
+        for shot in value["shots"]:
+            self.assertEqual(shot["frames_analyzed"], 1)
+            self.assertTrue(shot["answers"], "每个镜头都应有 AI 的回答")
+            self.assertEqual(shot["labels"], ["方块", "条纹"], "标签应来自 AI 返回")
+
+        self.assertEqual(value["label_vocabulary"], ["方块", "条纹"])
+
+    def test_labels_come_from_the_model_not_a_hardcoded_map(self) -> None:
+        """把模型回复换掉，工具输出的标签必须跟着变。"""
+        ctx = self.make_context()
+        self.server.answer_reply = '{"answer": "一片森林", "labels": ["森林", "树木", "户外"]}'
+
+        value = self.annotate(ctx).value
+        self.assertEqual(value["label_vocabulary"], ["森林", "树木", "户外"])
+        for shot in value["shots"]:
+            self.assertEqual(shot["labels"], ["森林", "树木", "户外"])
+        self.assertIn("一片森林", value["shots"][0]["answers"])
+
+    def test_annotate_uses_question_mode(self) -> None:
+        """必须走定向提问模式：提示词里要带上插件定义的问题。"""
+        ctx = self.make_context()
+        value = self.annotate(ctx).value
+
+        self.assertTrue(value["question"], "工具应声明它问了什么")
+        sent = self.server.last("/chat/completions")["payload"]
+        text = prompt_text(sent)
+        self.assertIn(QUESTION_MARKER, text, "应走提问模式的提示词")
+        self.assertIn(value["question"], text, "插件定义的问题必须原样发给模型")
+
+    def test_frames_per_shot_is_respected(self) -> None:
+        ctx = self.make_context()
+        value = self.annotate(ctx, frames_per_shot=2).value
+        self.assertEqual(value["frames_analyzed"], 6, "3 镜头 × 2 帧")
+
+    # ---------- 失败处理 ----------
+    def test_fails_clearly_when_ai_produces_nothing(self) -> None:
+        """一帧都没成功时必须明确失败 —— 返回一堆空标签比失败更糟。
+
+        否则调用方会以为"AI 说这个视频没有内容"。
+        """
+        ctx = self.make_context()
+        self.server.fail_with = 500
+        result = self.annotate(ctx)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, "execution_failed")
+        self.assertIn("AI 理解未产出任何结果", result.message)
+        self.assertIn("500", result.message)
+
+    def test_ai_layer_not_configured_fails_with_actionable_message(self) -> None:
+        ctx = AppContext.create(root=self.root, console=False, overrides={"ai.model": ""})
+        self.addCleanup(ctx.close)
+        manager = PluginManager(ctx, [PLUGINS_DIR], ctx.logger)
+        manager.discover()
+        manager.activate("video_analyzer")
+
+        result = ctx.tool_registry.call("video_annotate", {"path": str(self.video)})
+        self.assertFalse(result.ok)
+        message = result.message
+        self.assertIn("provider=ollama", message)
+        self.assertIn("检查建议：", message)
+
+
 # ================= 验收 4：AI 能力属于 Core =================
 
 
@@ -1013,6 +1328,55 @@ class CorePlacementTests(unittest.TestCase):
 
 
 # ================= 验收 5：插件无直接模型调用 =================
+
+
+class CaseInsensitiveScanTests(unittest.TestCase):
+    """TASK-008 验收 3：大小写不敏感的 grep。
+
+    TASK-007 的检查是**大小写敏感**的，于是 `不接 Ollama` 这种大写写法能躲过去 ——
+    本任务在做真实接入时发现了这个漏洞（`video_analyzer` 的文档字符串里就有），
+    这里把它补上。
+    """
+
+    #: 验收标准点名的两个插件
+    AI_LAYER_PLUGINS = ("ai_test_plugin", "video_analyzer")
+
+    def sources(self, plugin: str) -> list[Path]:
+        return sorted((PLUGINS_DIR / plugin).rglob("*.py"))
+
+    def scan(self, paths: list[Path]) -> list[str]:
+        offenders: list[str] = []
+        for path in paths:
+            lowered = path.read_text(encoding="utf-8").lower()
+            for token in FORBIDDEN_IN_PLUGINS:
+                if token.lower() in lowered:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}: 含 {token!r}")
+        return offenders
+
+    def test_ai_layer_plugins_are_clean_case_insensitively(self) -> None:
+        paths: list[Path] = []
+        for plugin in self.AI_LAYER_PLUGINS:
+            found = self.sources(plugin)
+            self.assertTrue(found, f"前置条件：{plugin} 应有源码")
+            paths.extend(found)
+
+        self.assertEqual(
+            self.scan(paths), [],
+            "大小写不敏感的扫描命中了禁止引用：\n" + "\n".join(self.scan(paths)),
+        )
+
+    def test_global_scan_known_exception_is_documented(self) -> None:
+        """把"全局扫描并不干净"这个事实固化下来，免得以后误以为它是干净的。
+
+        `plugins/knowledge_base` 的文档里出现了被禁词，但**它不是本任务的产物**，
+        本任务不改它（范围外只报告）。若哪天它被修好了，这条测试仍然通过。
+        """
+        offenders = self.scan(sorted(PLUGINS_DIR.rglob("*.py")))
+        unexpected = [item for item in offenders if "knowledge_base" not in item]
+        self.assertEqual(
+            unexpected, [],
+            "除已知的 knowledge_base 之外出现了新的命中：\n" + "\n".join(unexpected),
+        )
 
 
 class NoDirectModelAccessTests(unittest.TestCase):

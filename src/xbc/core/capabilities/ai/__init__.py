@@ -21,6 +21,7 @@ from .provider import (
     image_data_url,
     parse_vision_payload,
     request_json,
+    vision_prompt,
 )
 from .providers import OllamaProvider, OpenAICompatibleProvider
 from .request import EmbeddingRequest, TextRequest, VisionRequest
@@ -33,6 +34,7 @@ from .types import (
     AIUnsupported,
     EmbeddingResult,
     TextResult,
+    VisionAnswer,
     VisionResult,
 )
 
@@ -51,6 +53,7 @@ __all__ = [
     "OpenAICompatibleProvider",
     "TextRequest",
     "TextResult",
+    "VisionAnswer",
     "VisionRequest",
     "VisionResult",
     "base_url",
@@ -59,4 +62,5 @@ __all__ = [
     "image_data_url",
     "parse_vision_payload",
     "request_json",
+    "vision_prompt",
 ]

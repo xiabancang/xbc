@@ -8,8 +8,15 @@
 | 能力 | 方法 | 输入 | 输出 |
 |---|---|---|---|
 | 文本生成 | `text_generate` | 提示词 | `TextResult` |
-| 视觉理解 | `vision_analyze` | 本地图片路径 | `VisionResult` |
+| 视觉理解 | `vision_analyze` | 本地图片路径，可选 `question` | `VisionResult` 或 `VisionAnswer` |
 | 向量化 | `embedding` | 一段或多段文本 | `EmbeddingResult` |
+
+**视觉有两种模式，返回两种不同的类型**（不用同一个字段承载两种语义）：
+
+| 模式 | 入参 | 返回 | 承载答案的字段 |
+|---|---|---|---|
+| 描述 | 不传 `question` | `VisionResult` | `description` |
+| 定向提问 | 传 `question` | `VisionAnswer` | `answer` |
 
 --------------------------------------------------------------------------
 **关于向量的跨 Provider 约束（重要，不要绕过）**
@@ -121,6 +128,36 @@ class VisionResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "description": self.description,
+            "labels": list(self.labels),
+            "provider": self.provider,
+            "model": self.model,
+            "raw": self.raw,
+            "usage": dict(self.usage),
+        }
+
+
+@dataclass
+class VisionAnswer:
+    """视觉**定向提问**的结果。
+
+    与 `VisionResult` 是两个类型，而不是同一个类的两个字段 ——
+    描述与"对某个问题的回答"是两种语义，混在一个字段里，调用方就得靠约定去猜。
+
+    `labels` 与描述模式同义：与画面相关的简短标签。
+    """
+
+    question: str
+    answer: str
+    labels: list[str] = field(default_factory=list)
+    provider: str = ""
+    model: str = ""
+    raw: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "question": self.question,
+            "answer": self.answer,
             "labels": list(self.labels),
             "provider": self.provider,
             "model": self.model,

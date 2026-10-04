@@ -36,12 +36,16 @@ class VisionRequest:
 
     **第一版只接受本地图片路径**：不接受 base64 字符串，也不接受 http(s) URL。
     这个限制是刻意的 —— 让"图片来源"只有一种形态，行为可预期、可审计。
+
+    `question` 为 `None` 时走**描述模式**（返回 `description` + `labels`）；
+    非 `None` 时走**定向提问模式**（返回 `answer` + `labels`）。
     """
 
     images: list[str] = field(default_factory=list)
+    question: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"images": [str(image) for image in self.images]}
+        return {"images": [str(image) for image in self.images], "question": self.question}
 
 
 @dataclass

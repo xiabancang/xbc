@@ -1,15 +1,12 @@
-"""视频分析器：第一个真实业务插件（基于 FFmpeg，不含 AI）。
+"""视频分析器：FFmpeg 做结构分析，AI 能力层做画面理解。
 
-## 它为什么存在
+## 它做什么
 
-TASK-005 的目的不是"再写一个插件"，而是**验证 Plugin Runtime 能否承载复杂业务能力**：
-一个工具内部要跑几十次 FFmpeg 子进程、产出多个文件、返回嵌套结构化结果，
-并且要在停用时干净释放。这些都是 MVP 里 hello/text 插件覆盖不到的。
+- **结构层（纯 FFmpeg）**：媒体信息、按画面变化切分镜头、抽取关键帧
+- **理解层（走 `ctx.ai`）**：把关键帧交给 AI 能力层，逐镜头产出标签与画面结论
 
-## 能力边界（任务明确禁止的都不做）
-
-- 不做 AI 生成视频、不接 Ollama、不联网、不发布、不涉及任何商业逻辑
-- 只用 `ctx.ffmpeg` 与 `ctx.files` 两个内核能力
+理解层**只调用 `ctx.ai.vision_analyze`**。本文件不 import 任何模型 SDK 或网络库，
+也不知道底下是哪家模型、跑在哪个端口 —— 换 Provider 不需要改这里一个字节。
 
 ## 命令形态的来源
 
@@ -22,16 +19,16 @@ TASK-005 的目的不是"再写一个插件"，而是**验证 Plugin Runtime 能
 
 ## 关于风险等级
 
-四个工具都标 `read`。它们确实会写文件，但**只写插件自己的 `ctx.data_dir`**
+五个工具都标 `read`。它们确实会写文件，但**只写插件自己的 `ctx.data_dir`**
 （内核保证与其他插件、与用户文件隔离），且可随时删除。
 按本项目对 `risk` 的定义（对**用户环境**的危险程度），这属于 read。
 真正会改用户文件的工具才标 `write` / `destructive`。
 
 ## 不做的事（有意为之）
 
-- **不做 AI 理解**：镜头内容分析属于后续插件，本插件只产出"结构性事实"
 - **不做时间轴回退补齐**：FFmpeg 的 `scene` 检测给出的是近似切点，不追求帧级精度
-- **不做转码/合成**：那是另一个插件的职责
+- **不做转码 / 合成**：那是另一个插件的职责
+- **不直接调模型**：理解层一律经 `ctx.ai`，插件侧不持有任何模型知识
 """
 
 from __future__ import annotations
@@ -41,10 +38,17 @@ import re
 from pathlib import Path
 from typing import Any
 
+from xbc.core.capabilities.ai import AIError
 from xbc.core.contract.plugin import XbcPlugin
 
 #: 从 ffmpeg showinfo 输出里取时间戳（V18 同款正则）
 _SCENE_TIME_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
+
+#: 送给 AI 的定向提问。**由插件定义** —— 这是业务语义，不该出现在内核里。
+FRAME_QUESTION = "这个画面的主要内容是什么？属于什么场景或拍摄类型？"
+
+#: 一次标注最多分析多少帧（安全上限，避免把长视频送去跑几十次 AI）
+MAX_ANNOTATED_FRAMES = 24
 
 VIDEO_SUFFIXES = {
     ".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv",
@@ -186,6 +190,45 @@ class VideoAnalyzerPlugin(XbcPlugin):
         )
 
         ctx.tools.register(
+            "video_annotate",
+            self.video_annotate,
+            description="关键帧 → AI 理解 → 标签：为每个镜头产出 AI 生成的标签与画面结论",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": path_schema,
+                    "frames_per_shot": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4,
+                        "description": "每个镜头送去做 AI 理解的关键帧数量；留空用配置值",
+                    },
+                    "threshold": {"type": "number", "minimum": 0.05, "maximum": 0.95},
+                },
+                "required": ["path"],
+            },
+            output_schema={
+                "type": "object",
+                "required": [
+                    "file", "question", "shot_count",
+                    "frames_analyzed", "label_vocabulary", "shots", "ai",
+                ],
+                "properties": {
+                    "file": {"type": "string"},
+                    "question": {"type": "string"},
+                    "duration_seconds": {"type": "number"},
+                    "shot_count": {"type": "integer"},
+                    "frames_analyzed": {"type": "integer"},
+                    "label_vocabulary": {"type": "array"},
+                    "shots": {"type": "array"},
+                    "ai": {"type": "object"},
+                    "errors": {"type": "array"},
+                },
+            },
+            risk="read",
+        )
+
+        ctx.tools.register(
             "video_analyze",
             self.video_analyze,
             description="一次完成：媒体信息 + 镜头切分 + 关键帧抽取，返回完整结构化结果",
@@ -216,7 +259,7 @@ class VideoAnalyzerPlugin(XbcPlugin):
                 "未检测到 FFmpeg：video_analyzer 的工具会在调用时明确报错，"
                 "请安装 FFmpeg 或配置 ffmpeg.ffmpeg_path"
             )
-        self.log.info("apply：已注册 4 个视频工具，配置 = %s", self._cfg)
+        self.log.info("apply：已注册 5 个视频工具，配置 = %s", self._cfg)
 
     # ---------------- 工具实现 ----------------
     def video_probe(self, path: str) -> dict[str, Any]:
@@ -268,6 +311,123 @@ class VideoAnalyzerPlugin(XbcPlugin):
             int(self._number(None, "max_shots", 200)),
         )
         return self._extract_frames(source, shots, per_shot)
+
+    def video_annotate(
+        self,
+        path: str,
+        frames_per_shot: int | None = None,
+        threshold: float | None = None,
+    ) -> dict[str, Any]:
+        """关键帧 → AI 理解 → 标签。
+
+        链路：FFmpeg 切分镜头 + 抽取关键帧（都在本插件内完成）
+        → 逐帧 `ctx.ai.vision_analyze(..., question=FRAME_QUESTION)`
+        → 汇总成每个镜头的答案与标签。
+
+        标签全部来自 AI 返回，插件不做任何硬编码映射。
+        """
+        source = self._require_video(path)
+        duration = self._duration(source)
+
+        per_shot = int(frames_per_shot or self._number(None, "annotate_frames_per_shot", 1))
+        per_shot = max(1, min(4, per_shot))
+
+        scene_threshold = self._number(threshold, "scene_threshold", 0.3)
+        shots = self._build_shots(
+            duration,
+            self._scene_times(source, scene_threshold),
+            self._number(None, "min_shot_seconds", 0.5),
+            int(self._number(None, "max_shots", 200)),
+        )
+        extracted = self._extract_frames(source, shots, per_shot)
+        return self._annotate_frames(source, duration, shots, extracted["frames"])
+
+    def _annotate_frames(
+        self,
+        source: Path,
+        duration: float,
+        shots: list[dict[str, Any]],
+        frames: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """把抽出来的关键帧逐帧交给 AI，再按镜头汇总。
+
+        逐帧失败**不让整轮失败**：记进 `errors` 继续跑完，这样一段坏帧不会
+        让整支视频的分析白做。但**一帧都没成功**时明确抛错 —— 返回一堆空标签
+        比失败更糟，调用方会以为"AI 说这个视频没有内容"。
+        """
+        by_shot: dict[int, list[dict[str, Any]]] = {}
+        for frame in frames:
+            by_shot.setdefault(frame["shot_index"], []).append(frame)
+
+        annotated: list[dict[str, Any]] = []
+        vocabulary: list[str] = []
+        errors: list[dict[str, str]] = []
+        analyzed = 0
+        ai_info: dict[str, Any] = {}
+
+        for shot in shots:
+            answers: list[str] = []
+            labels: list[str] = []
+            counts: dict[str, int] = {}
+            shot_errors: list[str] = []
+
+            for frame in by_shot.get(shot["index"], []):
+                if analyzed >= MAX_ANNOTATED_FRAMES:
+                    shot_errors.append(
+                        f"已达本次分析上限（{MAX_ANNOTATED_FRAMES} 帧），跳过 {frame['file']}"
+                    )
+                    continue
+                try:
+                    result = self.ctx.ai.vision_analyze(
+                        [frame["file"]], question=FRAME_QUESTION
+                    )
+                except AIError as exc:
+                    message = str(exc)
+                    errors.append({"frame": frame["file"], "error": message})
+                    shot_errors.append(message)
+                    continue
+
+                analyzed += 1
+                ai_info = {"provider": result.provider, "model": result.model}
+                answers.append(result.answer)
+                for label in result.labels:
+                    counts[label] = counts.get(label, 0) + 1
+                    if label not in labels:
+                        labels.append(label)
+                    if label not in vocabulary:
+                        vocabulary.append(label)
+
+            annotated.append(
+                {
+                    "index": shot["index"],
+                    "start": shot["start"],
+                    "end": shot["end"],
+                    "duration": shot["duration"],
+                    "frames_analyzed": len(answers),
+                    "answers": answers,
+                    "labels": labels,
+                    "label_counts": counts,
+                    "errors": shot_errors,
+                }
+            )
+
+        if analyzed == 0 and errors:
+            raise AIError(
+                f"AI 理解未产出任何结果（{len(errors)} 帧全部失败）。"
+                f"首条错误：{errors[0]['error']}"
+            )
+
+        return {
+            "file": str(source),
+            "question": FRAME_QUESTION,
+            "duration_seconds": round(duration, 3),
+            "shot_count": len(shots),
+            "frames_analyzed": analyzed,
+            "label_vocabulary": vocabulary,
+            "shots": annotated,
+            "ai": ai_info,
+            "errors": errors,
+        }
 
     def video_analyze(
         self,

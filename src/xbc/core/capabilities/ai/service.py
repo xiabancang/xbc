@@ -42,6 +42,7 @@ from .types import (
     AIUnsupported,
     EmbeddingResult,
     TextResult,
+    VisionAnswer,
     VisionResult,
 )
 
@@ -162,15 +163,25 @@ class AIService:
         chosen = self.provider(capability=AICapability.TEXT)
         return chosen.text_generate(TextRequest(prompt=prompt, system=system))
 
-    def vision_analyze(self, images: list[str] | str) -> VisionResult:
+    def vision_analyze(
+        self, images: list[str] | str, *, question: str | None = None
+    ) -> VisionResult | VisionAnswer:
         """视觉理解。输入：**本地图片路径**（单个或一组）。
 
         只接受本地路径 —— 不接受 base64、不接受 URL。传错形态会明确报错。
-        输出是结构化的 `VisionResult`（`description` + `labels`），不是一段字符串。
+
+        两种模式，返回两种类型：
+
+        - 不传 `question` → `VisionResult`（`description` + `labels`），
+          行为与 TASK-007 完全一致；
+        - 传 `question` → `VisionAnswer`（`answer` + `labels`），
+          用调用方的问题去问这张图。
         """
         paths = [images] if isinstance(images, str) else list(images)
         chosen = self.provider(capability=AICapability.VISION)
-        return chosen.vision_analyze(VisionRequest(images=[str(p) for p in paths]))
+        return chosen.vision_analyze(
+            VisionRequest(images=[str(p) for p in paths], question=question)
+        )
 
     def embedding(self, texts: list[str] | str) -> EmbeddingResult:
         """向量化。输入：一段或多段文本。

@@ -117,8 +117,15 @@ class VideoAnalyzerTests(unittest.TestCase):
             self.assertEqual(spec.plugin_id, "video_analyzer")
 
     def test_plugin_declares_expected_capabilities(self) -> None:
+        """TASK-008 起，本插件通过 `ctx.ai` 做画面理解，因此必须声明 ai 能力。"""
         manifest = self.manager.get("video_analyzer").manifest
-        self.assertEqual(set(manifest.capabilities), {"files", "ffmpeg", "settings"})
+        self.assertEqual(set(manifest.capabilities), {"files", "ffmpeg", "settings", "ai"})
+
+    def test_ai_capability_is_actually_reachable(self) -> None:
+        """声明了 ai 就必须真的能拿到 —— 否则会在调用时才炸。"""
+        record = self.manager.get("video_analyzer")
+        self.assertIn("ai", tuple(record.instance.ctx.capabilities))
+        self.assertIsNotNone(record.instance.ctx.ai)
 
     # ---------------- 4. 输出结果正确 ----------------
     def test_video_probe_returns_correct_media_info(self) -> None:
@@ -237,8 +244,14 @@ class VideoAnalyzerTests(unittest.TestCase):
         self.assertEqual(result.code, "invalid_arguments")
 
     # ---------------- 5. 禁用无残留 ----------------
+    def declared_tool_count(self) -> int:
+        """清单声明的工具数 —— 不硬编码，否则插件加一个工具这条测试就假失败。"""
+        return len(self.manager.get("video_analyzer").manifest.tools)
+
     def test_disable_leaves_no_residue(self) -> None:
-        self.assertEqual(len(self.ctx.tool_registry), 4)
+        expected = self.declared_tool_count()
+        self.assertGreater(expected, 0)
+        self.assertEqual(len(self.ctx.tool_registry), expected)
         record = self.manager.get("video_analyzer")
         self.assertGreater(record.scope.effect_count, 0)
 
@@ -251,9 +264,11 @@ class VideoAnalyzerTests(unittest.TestCase):
         self.assertFalse(record.enabled)
 
     def test_reactivation_after_disable(self) -> None:
+        before = len(self.ctx.tool_registry)
         self.manager.disable("video_analyzer")
+        self.assertEqual(len(self.ctx.tool_registry), 0)
         self.manager.enable("video_analyzer")
-        self.assertEqual(len(self.ctx.tool_registry), 4)
+        self.assertEqual(len(self.ctx.tool_registry), before)
         self.assertTrue(self.call("video_probe", path=str(self.video)).ok)
 
     # ---------------- 1. 独立安装 ----------------
