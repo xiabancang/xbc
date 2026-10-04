@@ -1,218 +1,272 @@
-"""最小图形宿主（PySide6）。
+"""最小桌面管理入口（Desktop Shell MVP）。
 
-它只是内核的一个"消费者"：
-插件列表、状态、动作按钮全部来自 PluginManager，
-宿主自身不含任何插件逻辑，也不认识任何具体插件。
+TASK-004 的范围**只有管理入口**：
 
-这就是"未来持续加插件而不需要频繁修改工具箱核心"的验证点：
-加一个插件，这个界面不用改一行代码。
+| 必须实现 | 禁止 |
+|---|---|
+| PySide6 窗口 | 登录系统 |
+| 显示插件列表 | 云端 |
+| 显示插件状态 | 商城 |
+| 启用插件 | 支付 |
+| 停用插件 | **UI 美化** |
+| 查看 Tool 列表 | 业务插件 |
+| 查看 Skill 列表 | |
+
+**"不做 UI 美化"是硬约束**：这里不写任何 `setStyleSheet`、不设字体、不设图标、
+不用自绘控件。全部使用 Qt 默认外观。
+
+## 一致性保证（验收标准之一）
+
+界面**不缓存任何状态**，也不自己判断"能不能启用"。每次刷新都重新从 Runtime 读取：
+
+- 插件列表 ← `PluginManager.records()`
+- 工具列表 ← `ctx.tool_registry.for_agent()`
+- 技能列表 ← `ctx.skill_catalog.specs()`
+
+启用/停用直接调用 `PluginManager.enable()` / `disable()` —— 与 CLI **同一个方法**。
+所以"桌面操作结果与 Runtime 状态一致"是**结构性保证**，而不是靠界面自觉同步。
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..core.contract.plugin import PluginState
 from ..version import APP_NAME, CORE_VERSION
 
-
-class QtLogHandler(logging.Handler):
-    """把内核日志搬进界面，用户能直接看到现场。"""
-
-    def __init__(self, widget: Any) -> None:
-        super().__init__()
-        self.widget = widget
-        self.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            self.widget.appendPlainText(self.format(record))
-        except Exception:  # noqa: BLE001 - 界面写日志失败不能反过来影响内核
-            pass
-
-
-def _qtwidgets() -> Any:
-    from PySide6 import QtWidgets
-
-    return QtWidgets
-
-
-def _qtcore() -> Any:
-    from PySide6 import QtCore
-
-    return QtCore
+#: 插件在列表里的显示顺序（按状态，便于一眼看出问题）
+_STATE_ORDER = {
+    PluginState.ACTIVE: 0,
+    PluginState.LOADED: 1,
+    PluginState.DISCOVERED: 2,
+    PluginState.INACTIVE: 3,
+    PluginState.FAILED: 4,
+    PluginState.UNLOADED: 5,
+}
 
 
 class HostWindow:
-    """用组合而不是继承，避免界面类被 Qt 的继承层次绑死。"""
+    """插件管理窗口。用组合而不是继承，避免界面类被 Qt 继承层次绑死。"""
 
-    def __init__(self, ctx: Any) -> None:
-        qt = _qtwidgets()
+    def __init__(self, ctx: Any, manager: Any = None) -> None:
         self.ctx = ctx
-        self.manager = ctx.create_plugin_manager()
+        self.manager = manager if manager is not None else ctx.create_plugin_manager()
+        self.manager.discover()
 
-        self.window = qt.QMainWindow()
-        self.window.setWindowTitle(f"{APP_NAME} v{CORE_VERSION}")
-        self.window.resize(1000, 640)
+        self.window = QMainWindow()
+        self.window.setWindowTitle(f"{APP_NAME} v{CORE_VERSION} — 插件管理")
+        self.window.resize(960, 600)
 
-        central = qt.QWidget()
+        central = QWidget()
         self.window.setCentralWidget(central)
-        root = qt.QVBoxLayout(central)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root = QVBoxLayout(central)
 
-        header = qt.QLabel(f"{APP_NAME} v{CORE_VERSION}　·　数据目录：{ctx.paths.root}")
-        root.addWidget(header)
+        # ---- 顶部：标题 + 数据目录 ----
+        root.addWidget(QLabel(f"{APP_NAME} v{CORE_VERSION}　数据目录：{ctx.paths.root}"))
 
-        body = qt.QHBoxLayout()
+        body = QHBoxLayout()
         root.addLayout(body, 1)
 
-        # 左：插件列表
-        left = qt.QVBoxLayout()
-        left.addWidget(qt.QLabel("插件"))
-        self.plugin_list = qt.QListWidget()
-        self.plugin_list.currentItemChanged.connect(lambda *_: self.refresh_actions())
+        # ---- 左：插件列表 + 操作 ----
+        left = QVBoxLayout()
+        left.addWidget(QLabel("插件"))
+        self.plugin_list = QListWidget()
+        self.plugin_list.currentItemChanged.connect(self._on_selection_changed)
         left.addWidget(self.plugin_list, 1)
 
-        button_row = qt.QHBoxLayout()
-        for text, slot in (
-            ("刷新", self.on_refresh),
-            ("启动", self.on_start),
-            ("停止", self.on_stop),
-            ("卸载", self.on_unload),
-        ):
-            button = qt.QPushButton(text)
-            button.clicked.connect(slot)
-            button_row.addWidget(button)
-        left.addLayout(button_row)
+        buttons = QHBoxLayout()
+        self.refresh_button = QPushButton("刷新")
+        self.enable_button = QPushButton("启用")
+        self.disable_button = QPushButton("停用")
+        self.refresh_button.clicked.connect(self.on_refresh)
+        self.enable_button.clicked.connect(self.on_enable)
+        self.disable_button.clicked.connect(self.on_disable)
+        for button in (self.refresh_button, self.enable_button, self.disable_button):
+            buttons.addWidget(button)
+        left.addLayout(buttons)
 
-        left.addWidget(qt.QLabel("动作"))
-        self.action_list = qt.QListWidget()
-        left.addWidget(self.action_list, 1)
-        invoke_button = qt.QPushButton("调用选中动作")
-        invoke_button.clicked.connect(self.on_invoke)
-        left.addWidget(invoke_button)
+        self.plugin_detail = QLabel("")
+        self.plugin_detail.setWordWrap(True)
+        left.addWidget(self.plugin_detail)
 
-        body.addLayout(left, 2)
+        body.addLayout(left, 1)
 
-        # 右：日志
-        right = qt.QVBoxLayout()
-        right.addWidget(qt.QLabel("内核日志"))
-        self.log_view = qt.QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        right.addWidget(self.log_view, 1)
-        body.addLayout(right, 3)
+        # ---- 右：工具列表 + 技能列表 ----
+        right = QVBoxLayout()
 
-        # 日志接入界面
-        handler = QtLogHandler(self.log_view)
-        logging.getLogger("xbc").addHandler(handler)
-        self._handler = handler
+        self.tools_label = QLabel("Tool（Agent 可调用）")
+        right.addWidget(self.tools_label)
+        self.tool_list = QListWidget()
+        right.addWidget(self.tool_list, 1)
 
-        self.manager.discover()
+        self.skills_label = QLabel("Skill（按需加载的指令）")
+        right.addWidget(self.skills_label)
+        self.skill_list = QListWidget()
+        right.addWidget(self.skill_list, 1)
+
+        body.addLayout(right, 1)
+
+        # ---- 底部：操作结果 ----
+        self.message = QPlainTextEdit()
+        self.message.setReadOnly(True)
+        self.message.setFixedHeight(90)
+        root.addWidget(self.message)
+
+        self.refresh()
+        self._log("就绪。启用/停用会直接调用 Runtime，与命令行行为一致。")
+
+    # ---------------- 从 Runtime 读取（不缓存） ----------------
+    def refresh(self) -> None:
+        """重新从 Runtime 读取插件 / 工具 / 技能，并重绘三个列表。"""
         self.refresh_plugins()
+        self.refresh_tools()
+        self.refresh_skills()
 
-    # ---------------- 刷新 ----------------
     def refresh_plugins(self) -> None:
-        qt = _qtwidgets()
-        previous = self._selected_id()
-
-        # 重建列表期间屏蔽信号，避免逐个插入时反复触发 refresh_actions
-        self.plugin_list.blockSignals(True)
+        records = sorted(
+            self.manager.records(),
+            key=lambda r: (_STATE_ORDER.get(r.state, 99), r.id),
+        )
         self.plugin_list.clear()
-        for record in self.manager.records():
-            item = qt.QListWidgetItem(f"{record.name}　[{record.state.value}]　{record.id}")
-            item.setData(_qtcore().Qt.ItemDataRole.UserRole, record.id)
-            if record.error:
-                item.setToolTip(record.error)
-            self.plugin_list.addItem(item)
-        self.plugin_list.blockSignals(False)
+        for record in records:
+            self.plugin_list.addItem(self._plugin_item(record))
+        self._on_selection_changed()
 
-        # 尽量保持原选中项；没有选中过就默认选第一个，
-        # 否则右侧"动作"区在用户点击之前永远是空的。
-        if self.plugin_list.count():
-            target_row = 0
-            for row in range(self.plugin_list.count()):
-                if self.plugin_list.item(row).data(_qtcore().Qt.ItemDataRole.UserRole) == previous:
-                    target_row = row
-                    break
-            self.plugin_list.setCurrentRow(target_row)
+    def _plugin_item(self, record: Any) -> QListWidgetItem:
+        flags = "启用" if record.enabled else "已禁用"
+        text = f"{record.name}（{record.id}）　{record.state.value}　{flags}"
+        if record.error:
+            text += f"　⚠ {record.error}"
+        elif record.blocked_reason:
+            text += f"　· {record.blocked_reason}"
+        item = QListWidgetItem(text)
+        item.setData(Qt_UserRole(), record.id)
+        return item
 
-        self.refresh_actions()
+    def refresh_tools(self) -> None:
+        specs = self.ctx.tool_registry.for_agent()
+        self.tool_list.clear()
+        for spec in specs:
+            risk = spec.get("annotations", {}).get("risk", "?")
+            owner = spec.get("annotations", {}).get("owner", "?")
+            description = (spec.get("description") or "").strip()
+            self.tool_list.addItem(f"{spec['name']}　[{risk}]　{owner}　{description}")
+        self.tools_label.setText(f"Tool（Agent 可调用）　共 {len(specs)} 个")
 
-    def refresh_actions(self) -> None:
-        self.action_list.clear()
-        record = self._selected()
-        if record is None:
-            return
-        # 插件对外提供的是 Tool（不再是旧版的 @action）
-        for name in sorted(record.tools_registered):
-            self.action_list.addItem(name)
+    def refresh_skills(self) -> None:
+        specs = self.ctx.skill_catalog.specs()
+        self.skill_list.clear()
+        for spec in specs:
+            description = (spec.description or "").strip()
+            self.skill_list.addItem(
+                f"{spec.name}　[model={spec.model_invocable} user={spec.user_invocable}]　{description}"
+            )
+        self.skills_label.setText(f"Skill（按需加载的指令）　共 {len(specs)} 个")
 
-    def _selected_id(self) -> str | None:
+    # ---------------- 选中与详情 ----------------
+    def selected_plugin_id(self) -> str | None:
         item = self.plugin_list.currentItem()
-        if item is None:
-            return None
-        return item.data(_qtcore().Qt.ItemDataRole.UserRole)
+        return item.data(Qt_UserRole()) if item is not None else None
 
-    def _selected(self) -> Any:
-        plugin_id = self._selected_id()
-        if plugin_id is None:
-            return None
-        try:
-            return self.manager.get(plugin_id)
-        except Exception:  # noqa: BLE001
-            return None
+    def select_plugin(self, plugin_id: str) -> bool:
+        for row in range(self.plugin_list.count()):
+            if self.plugin_list.item(row).data(Qt_UserRole()) == plugin_id:
+                self.plugin_list.setCurrentRow(row)
+                return True
+        return False
 
-    # ---------------- 按钮 ----------------
+    def _on_selection_changed(self, *_: Any) -> None:
+        plugin_id = self.selected_plugin_id()
+        has_selection = plugin_id is not None
+        # 按钮可用性只反映"有没有选中"，不预测能否启用（那由 Runtime 决定）
+        self.enable_button.setEnabled(has_selection)
+        self.disable_button.setEnabled(has_selection)
+        if not has_selection:
+            self.plugin_detail.setText("")
+            return
+
+        record = next(
+            (r for r in self.manager.records() if r.id == plugin_id),
+            None,
+        )
+        if record is None:
+            self.plugin_detail.setText("")
+            return
+        manifest = record.manifest
+        lines = [
+            f"版本 {manifest.version}　API {manifest.api_version}　清单规范 {manifest.spec_version}",
+            f"能力：{', '.join(manifest.capabilities) or '（无）'}",
+            f"配置来源：{record.config_source}　配置：{self.ctx.effective_config_for(manifest)}",
+        ]
+        if record.error:
+            lines.append(f"错误：{record.error}")
+        self.plugin_detail.setText("\n".join(lines))
+
+    # ---------------- 操作（与 CLI 同一方法） ----------------
     def on_refresh(self) -> None:
         self.manager.discover()
-        self.refresh_plugins()
+        self.refresh()
+        self._log("已刷新（重新扫描插件目录并从 Runtime 读取状态）")
 
-    def on_start(self) -> None:
-        record = self._selected()
-        if record is not None:
-            self.manager.activate(record.id)
-            self.refresh_plugins()
+    def on_enable(self) -> None:
+        plugin_id = self.selected_plugin_id()
+        if plugin_id:
+            self.enable(plugin_id)
 
-    def on_stop(self) -> None:
-        record = self._selected()
-        if record is not None:
-            self.manager.deactivate(record.id)
-            self.refresh_plugins()
+    def on_disable(self) -> None:
+        plugin_id = self.selected_plugin_id()
+        if plugin_id:
+            self.disable(plugin_id)
 
-    def on_unload(self) -> None:
-        record = self._selected()
-        if record is not None:
-            self.manager.unload(record.id)
-            self.refresh_plugins()
+    def enable(self, plugin_id: str) -> Any:
+        """启用插件。与 CLI 的 `plugin enable` 走**完全相同**的代码路径。"""
+        record = self.manager.enable(plugin_id)
+        self._after_operation("启用", record)
+        return record
 
-    def on_invoke(self) -> None:
-        qt = _qtwidgets()
-        record = self._selected()
-        item = self.action_list.currentItem()
-        if record is None or item is None:
-            return
-        action = item.text()
-        try:
-            # 先激活再调用，保证工具已注册
-            self.manager.activate(record.id)
-            result = self.ctx.tool_registry.call(action)
-            if result.ok:
-                qt.QMessageBox.information(self.window, "执行结果", f"{action}:\n{result.value}")
-            else:
-                qt.QMessageBox.warning(self.window, "执行失败", f"{action}:\n[{result.code}] {result.message}")
-        except Exception as exc:  # noqa: BLE001 - 界面只负责把错误显示出来
-            qt.QMessageBox.warning(self.window, "执行失败", f"{action} 失败:\n{exc}")
-        self.refresh_plugins()
+    def disable(self, plugin_id: str) -> Any:
+        """停用插件。与 CLI 的 `plugin disable` 走**完全相同**的代码路径。"""
+        record = self.manager.disable(plugin_id)
+        self._after_operation("停用", record)
+        return record
+
+    def _after_operation(self, action: str, record: Any) -> None:
+        # 操作后**重新从 Runtime 读取**，而不是自己改界面
+        self.refresh()
+        self.select_plugin(record.id)
+        detail = f"{action} {record.id} → 状态 {record.state.value}"
+        if record.error:
+            detail += f"　错误：{record.error}"
+        elif record.blocked_reason:
+            detail += f"　{record.blocked_reason}"
+        self._log(detail)
+
+    # ---------------- 日志 ----------------
+    def _log(self, text: str) -> None:
+        self.message.appendPlainText(text)
+
+
+def Qt_UserRole() -> int:
+    """插件 id 在列表项里存放的 role（用整数，便于测试断言）。"""
+    return int(Qt.ItemDataRole.UserRole)
 
 
 def run_shell(ctx: Any) -> int:
-    """启动图形宿主。PySide6 在此处才被导入，内核因此保持与 Qt 无关。"""
-    from PySide6.QtWidgets import QApplication
-
+    """启动桌面管理入口。"""
     app = QApplication.instance() or QApplication([])
     host = HostWindow(ctx)
     host.window.show()

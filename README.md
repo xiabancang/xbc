@@ -2,14 +2,15 @@
 
 一个**可插件化**的 Windows 本地工具平台内核。
 
-当前阶段已完成 **Plugin Runtime V1**：插件可以安装、发现、激活、配置、停用、卸载；
-插件通过明确的契约向 Agent 提供**工具**与**技能**；内核不认识任何具体插件。
+当前阶段已完成 **Plugin Runtime V1** 与 **Desktop Shell MVP**：插件可以安装、发现、激活、配置、停用、卸载；
+插件通过明确的契约向 Agent 提供**工具**与**技能**；内核不认识任何具体插件；
+桌面端提供最小管理入口，且**操作结果与运行时状态一致**（界面不缓存状态）。
 
 > 技术方案：[docs/plugin-runtime-v1.md](docs/plugin-runtime-v1.md)
 > 测试报告与验收结果：[docs/plugin-runtime-v1-test-report.md](docs/plugin-runtime-v1-test-report.md)
 > 任务台账：[TASKS.md](TASKS.md)
 
-![早期占位宿主截图（图形界面将在 TASK-004 重建）](docs/shell-preview.png)
+![桌面管理入口：插件列表与状态、启用/停用、Tool 与 Skill 列表](docs/shell-preview.png)
 
 ---
 
@@ -48,7 +49,7 @@ XBC/
 │  │  ├─ config/             三层配置装配
 │  │  ├─ diagnostics.py      环境体检 + 运行时诊断
 │  │  └─ context.py          AppContext（内核）/ PluginContext（受限视图）
-│  └─ ui/shell.py            早期占位宿主（图形界面待 TASK-004 重建）
+│  └─ ui/shell.py            桌面管理入口（插件列表/状态、启用停用、Tool/Skill 列表）
 ├─ plugins/                  内置插件
 │  ├─ hello_xbc/             机制验证插件
 │  └─ text_toolbox/          第一个真实业务插件（纯本地文本处理）
@@ -81,6 +82,9 @@ python run.py --yes tool call hello_greet     # write 工具需要显式授权
 # 技能（目录只给名称+描述，正文按需加载）
 python run.py skill list
 python run.py skill load text-cleanup
+
+# 桌面管理入口（插件列表/状态、启用停用、Tool 与 Skill 列表）
+python run.py ui
 ```
 
 跑测试：
@@ -260,4 +264,25 @@ python -m venv .venv
 
 ## 下一步
 
-见 [TASKS.md](TASKS.md)（TASK-004 起）。
+见 [TASKS.md](TASKS.md)（TASK-005 起）。
+
+---
+
+## 桌面管理入口
+
+```powershell
+python run.py ui
+```
+
+最小管理入口，**只做管理、不做美化**（无样式表、无自定义控件，全部 Qt 默认外观）：
+
+| 区域 | 内容 |
+|---|---|
+| 左栏 | 插件列表（名称 / id / 状态 / 启用状态，失败时显示原因）+ 详情 + 刷新/启用/停用 |
+| 右上 | Tool 列表（名称 / 风险等级 / 归属插件 / 描述） |
+| 右下 | Skill 列表（名称 / model·user 调用策略 / 描述） |
+| 底部 | 操作结果日志 |
+
+**一致性保证**：界面不缓存任何状态，每次刷新都重新从运行时读取；启用/停用调用的是与 CLI
+**完全相同**的方法（`PluginManager.enable()` / `disable()`）。因此"桌面操作结果与运行时状态一致"
+是结构性保证，而不是靠界面自觉同步。
