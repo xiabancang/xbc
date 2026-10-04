@@ -66,6 +66,21 @@ class AppPaths:
         return self.root / "cache"
 
     @property
+    def models_dir(self) -> Path:
+        """**Core 级共享模型目录**：`<数据根>/models/<模型标识>/`。
+
+        为什么不放插件数据目录：插件数据目录是**按插件隔离**的，
+        两个插件要用同一个模型就会各存一份（中文 CLIP 一份 294MB）。
+        模型是**跨插件共享资源**，所以放在这里，与 TASK-006 定下的
+        "用户数据与插件目录分离"同一条原则 —— 它既不随 `.xbcplugin` 包分发，
+        也不属于任何一个插件。
+
+        插件**不应该自己拼这个路径**：Core 在注册 Provider 时通过
+        `ModelProvider.bind_models()` 把位置交给实现方。
+        """
+        return self.root / "models"
+
+    @property
     def user_plugins_dir(self) -> Path:
         """用户安装的插件目录（将来插件商城的落地位置）。"""
         return self.root / "plugins"
@@ -113,6 +128,7 @@ class AppPaths:
             self.logs_dir,
             self.data_dir,
             self.cache_dir,
+            self.models_dir,
             self.user_plugins_dir,
             self.user_config_dir,
             self.user_skills_dir,

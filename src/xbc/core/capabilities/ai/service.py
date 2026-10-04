@@ -31,6 +31,7 @@ vectors = ctx.ai.embedding(["第一段", "第二段"])
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 from .providers import OllamaProvider, OpenAICompatibleProvider
@@ -55,22 +56,48 @@ KNOWN_PROVIDERS = ("ollama", "openai_compatible")
 class AIService:
     """AI 能力门面。一个进程一份，由 `AppContext` 装配。"""
 
-    def __init__(self, logger: Any = None, configuration_error: str = "") -> None:
+    def __init__(
+        self,
+        logger: Any = None,
+        configuration_error: str = "",
+        models_dir: Path | str | None = None,
+    ) -> None:
         self._providers: dict[str, Any] = {}
         self._default: str | None = None
         self._log = logger
         #: "为什么一个 Provider 都没装配起来"，供报错时使用
         self._configuration_error = configuration_error
+        #: **Core 级共享模型目录**。Provider 不该自己拼路径，插件更不该。
+        self._models_dir = Path(models_dir) if models_dir else None
 
     # ---------------- 装配 ----------------
     def register(self, provider: Any, *, default: bool = False) -> Disposer:
-        """注册一个 Provider。返回 disposer（可挂到作用域上）。"""
+        """注册一个 Provider。返回 disposer（可挂到作用域上）。
+
+        注册时会把**共享模型目录**交给 Provider（`bind_models`）——
+        这就是"模型路径由 Core / 注册机制解析"的落点：
+        **插件不需要知道模型在哪，甚至不需要知道有这个模型。**
+        """
         if not provider.name:
             raise AIError("Provider 必须有 name")
+        if self._models_dir is not None and hasattr(provider, "bind_models"):
+            provider.bind_models(self._models_dir)
         self._providers[provider.name] = provider
         if default or self._default is None:
             self._default = provider.name
         return lambda: self._providers.pop(provider.name, None)
+
+    @property
+    def models_dir(self) -> Path:
+        """共享模型目录。**插件不该直接用它拼路径**，交给 Provider 的 `bind_models`。"""
+        return self._models_dir or Path("models")
+
+    def model_dir(self, model_id: str) -> Path:
+        """解析某个模型在共享目录下的位置。
+
+        路径拼接是 Core 的职责 —— 换一处存放位置只改这里，不用改任何 Provider 或插件。
+        """
+        return self.models_dir / str(model_id)
 
     @property
     def default_provider(self) -> str:
@@ -210,8 +237,17 @@ class AIService:
         )
 
 
-def build_ai_service(config: Any, logger: Any = None, secrets: Any = None) -> AIService:
+def build_ai_service(
+    config: Any,
+    logger: Any = None,
+    secrets: Any = None,
+    models_dir: Path | str | None = None,
+) -> AIService:
     """按配置装配 AI 服务。**显式两个分支，没有注册表。**
+
+    `models_dir` 是**共享模型目录**（`<数据根>/models`）。它由 Core 从路径层传入，
+    注册 Provider 时会通过 `bind_models` 交给实现方 ——
+    插件与 Provider 都**不自己拼模型路径**。
 
     配置形状：
 
@@ -239,6 +275,7 @@ def build_ai_service(config: Any, logger: Any = None, secrets: Any = None) -> AI
     if not provider_name:
         return AIService(
             logger=logger,
+            models_dir=models_dir,
             configuration_error=(
                 "未配置 AI Provider\n"
                 "原因：config.json 的 ai.provider 为空\n"
@@ -249,6 +286,7 @@ def build_ai_service(config: Any, logger: Any = None, secrets: Any = None) -> AI
     if provider_name not in KNOWN_PROVIDERS:
         return AIService(
             logger=logger,
+            models_dir=models_dir,
             configuration_error=(
                 f"ai.provider 配置有误\n"
                 f"原因：ai.provider = {provider_name!r}，内核未实现该 Provider\n"
@@ -256,7 +294,7 @@ def build_ai_service(config: Any, logger: Any = None, secrets: Any = None) -> AI
             ),
         )
 
-    service = AIService(logger=logger)
+    service = AIService(logger=logger, models_dir=models_dir)
 
     if provider_name == "ollama":
         ollama_cfg = dict(config.get("ai.ollama", {}) or {})
@@ -280,6 +318,7 @@ def build_ai_service(config: Any, logger: Any = None, secrets: Any = None) -> AI
     if not base:
         return AIService(
             logger=logger,
+            models_dir=models_dir,
             configuration_error=(
                 "provider=openai_compatible 配置不完整\n"
                 "原因：未配置 ai.openai_compatible.base_url，不知道要连哪个服务\n"

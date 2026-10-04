@@ -13,14 +13,24 @@ TASK-010 选的 `OFA-Sys/chinese-clip-rn50`（Apache-2.0）在 HuggingFace 上
 | 本脚本（开发机，跑一次） | `torch` `torchvision` `timm` `cn_clip` `onnx` |
 | 插件运行时 | **`onnxruntime` `numpy` `pillow`** —— 不需要 torch |
 
-产物写进 `--out` 目录，插件配置 `clip_model_dir` 指过去即可。
+产物写进 `--out` 目录。**该目录应当是 Core 的共享模型目录**：
+
+```
+<数据根>/models/chinese-clip-rn50/
+```
+
+模型**不随 `.xbcplugin` 包分发**，也不放插件数据目录 —— 它是 Core 级共享资源，
+所有插件共用一份。插件不知道任何模型路径（路径由注册机制注入），
+所以这里放好之后**不需要改任何插件配置**。
 
 ```bash
 # 准备（在**仓库外的独立 venv** 里做，不要污染产品环境）
 python -m venv .venv-export && .venv-export/Scripts/activate     # Windows
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install --no-deps cn_clip && pip install timm six regex ftfy onnx
-python scripts/export_chinese_clip_onnx.py --out D:/models/chinese-clip-rn50
+
+# 导出到共享模型目录（Windows 默认 %LOCALAPPDATA%\夏半仓工具箱\models）
+python scripts/export_chinese_clip_onnx.py --out "%LOCALAPPDATA%\夏半仓工具箱\models\chinese-clip-rn50"
 ```
 
 ## 导出的正确性怎么保证
@@ -51,7 +61,10 @@ CONTEXT_LENGTH = 52
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="导出 chinese-clip-rn50 为 ONNX")
-    parser.add_argument("--out", required=True, help="输出目录")
+    parser.add_argument(
+        "--out", required=True,
+        help="输出目录（应为 Core 共享模型目录下的 chinese-clip-rn50/）",
+    )
     parser.add_argument("--opset", type=int, default=17)
     args = parser.parse_args()
 
@@ -157,8 +170,8 @@ def main() -> int:
         print("\n❌ 校验未通过：ONNX 与 torch 不等价", file=sys.stderr)
         return 1
     print("\n✅ 校验通过：ONNX 与 torch 等价")
-    print("   把该目录配到插件的 clip_model_dir，或放到插件数据目录的 "
-          "models/chinese-clip-rn50/ 下。")
+    print("   该目录是 Core 级共享模型目录，插件不需要任何配置就能找到它。")
+    print("   用 library_status 的 image_embedding 字段确认已就绪。")
     return 0
 
 

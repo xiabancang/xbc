@@ -865,31 +865,95 @@ class TwoVectorSpaceTests(_TwoSpaceBase):
 
 
 class ChineseClipModuleTests(unittest.TestCase):
-    """`xbc_va_clip` 的离线契约（不需要真的模型文件）。"""
+    """`xbc_va_clip` 的离线契约（不需要真的模型文件）。
 
-    def test_provider_is_unavailable_without_model_files(self) -> None:
+    重点覆盖 TASK-010 补充约束：**模型位置由 Core 注入，插件不解析路径**。
+    """
+
+    def test_provider_is_unavailable_before_core_injects_a_location(self) -> None:
         from xbc_va_clip import ChineseClipProvider
 
-        provider = ChineseClipProvider(None)
-        self.assertFalse(provider.available())
+        provider = ChineseClipProvider()
         self.assertFalse(provider.configured())
+        self.assertFalse(provider.available())
         # 关键：**没配好就不声明能力**，否则路由会选到一个必然失败的 Provider
         self.assertFalse(provider.supports(AICapability.IMAGE_EMBEDDING))
         self.assertFalse(provider.supports(AICapability.EMBEDDING))
 
-    def test_provider_reports_where_the_model_should_be(self) -> None:
+    def test_model_dir_comes_from_the_injected_root(self) -> None:
+        """路径拼接只有一处，且根来自 Core —— 换存放位置不用改 Provider。"""
+        from xbc_va_clip import MODEL_ID, ChineseClipProvider
+
+        provider = ChineseClipProvider()
+        root = Path(tempfile.mkdtemp(prefix="xbc-models-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        provider.bind_models(root)
+        self.assertEqual(provider.model_dir, root / MODEL_ID)
+        self.assertFalse(provider.configured(), "目录存在但文件不全，仍应不可用")
+
+    def test_bind_models_is_what_aiservice_calls_on_register(self) -> None:
+        """注册机制负责注入 —— 插件不必、也无法自己传路径。"""
+        from xbc.core.capabilities.ai import AIService
+        from xbc_va_clip import MODEL_ID, ChineseClipProvider
+
+        root = Path(tempfile.mkdtemp(prefix="xbc-reg-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        service = AIService(models_dir=root)
+        service.register(ChineseClipProvider())
+        provider = service.provider("chinese_clip")
+        self.assertEqual(provider.model_dir, root / MODEL_ID)
+
+    def test_aiservice_resolves_model_dir_for_callers(self) -> None:
+        from xbc.core.capabilities.ai import AIService
+
+        root = Path(tempfile.mkdtemp(prefix="xbc-modeldir-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        service = AIService(models_dir=root)
+        self.assertEqual(service.model_dir("some-model"), root / "some-model")
+
+    def test_missing_model_error_says_where_and_how_to_get_it(self) -> None:
+        """验收要求：模型缺失要给出**明确错误与获取方式**。"""
         from xbc_va_clip import ChineseClipProvider, ChineseClipUnavailable
 
-        provider = ChineseClipProvider("/nonexistent/dir")
-        self.assertFalse(provider.available())
+        provider = ChineseClipProvider()
+        root = Path(tempfile.mkdtemp(prefix="xbc-missing-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        provider.bind_models(root)
+
         with self.assertRaises(ChineseClipUnavailable) as caught:
             provider.embed_images(ImageEmbeddingRequest(images=["a.jpg"]))
-        self.assertIn("模型文件缺失", str(caught.exception))
+        message = str(caught.exception)
+        self.assertIn(str(root / "chinese-clip-rn50"), message, "必须给出绝对路径")
+        self.assertIn("export_chinese_clip_onnx.py", message, "必须给出获取方式")
+        self.assertIn("缺失文件", message)
+
+    def test_describe_reports_which_model_files_are_missing(self) -> None:
+        from xbc_va_clip import ChineseClipProvider
+
+        provider = ChineseClipProvider()
+        root = Path(tempfile.mkdtemp(prefix="xbc-describe-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        provider.bind_models(root)
+        described = provider.describe(probe=False)
+        self.assertEqual(described["model_dir"], str(root / "chinese-clip-rn50"))
+        self.assertEqual(
+            set(described["model_files"]),
+            {"vision_model.onnx", "text_model.onnx", "vocab.txt"},
+        )
+        self.assertTrue(all(v == "缺失" for v in described["model_files"].values()))
+
+    def test_plugin_declares_no_model_config(self) -> None:
+        """约束：插件只声明"需要 embedding 能力"，**不声明"需要模型文件"**。"""
+        manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        properties = manifest["config_schema"]["properties"]
+        self.assertNotIn("clip_model_dir", properties)
+        for name in properties:
+            self.assertNotIn("model", name.lower(), f"插件配置不应出现模型相关项：{name}")
 
     def test_empty_request_returns_empty_result(self) -> None:
         from xbc_va_clip import ChineseClipProvider
 
-        provider = ChineseClipProvider(None)
+        provider = ChineseClipProvider()
         result = provider.embed_images(ImageEmbeddingRequest(images=[]))
         self.assertEqual(result.count, 0)
         self.assertEqual(result.dim, 0)
@@ -903,13 +967,11 @@ class ChineseClipModuleTests(unittest.TestCase):
     def test_tokenizer_ids_match_the_official_implementation(self) -> None:
         """`星空` 在官方 vocab 里是 [3215, 4958]（实测值，见交付报告）。
 
-        这条断言不需要 vocab 文件：直接构造一个最小词表验证**编码流程**
+        这条断言不需要官方 vocab 文件：直接构造一个最小词表验证**编码流程**
         （[CLS] … [SEP] + 补齐）是否与官方一致。
         """
-        import tempfile as _tempfile
-
-        vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "星", "空", "的", "##图"]
-        with _tempfile.TemporaryDirectory() as folder:
+        vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "星", "空"]
+        with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "vocab.txt"
             path.write_text("\n".join(vocab), encoding="utf-8")
             from xbc_va_clip import BertWordPieceTokenizer

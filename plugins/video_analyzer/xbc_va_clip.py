@@ -25,11 +25,33 @@ Provider 同时声明：
 这也正是 `AICapability` 把"文本向量化"与"图片向量化"分成两个能力的原因：
 别的 Provider（如 `nomic-embed-text`）只做文本，不该被误选来编码图片。
 
-## 模型文件
+## 模型放在哪（TASK-010 补充约束）
 
-`clip_model_dir` 指向含 `vision_model.onnx` / `text_model.onnx` / `vocab.txt` 的目录；
-留空则用插件数据目录下的 `models/chinese-clip-rn50/`。
-文件不全时 `available()` 返回 **False**（不抛异常），调用方会得到一句可照做的错误。
+**模型不随 `.xbcplugin` 包分发，也不放插件数据目录。** 它是 **Core 级共享资源**：
+
+```
+<数据根>/models/chinese-clip-rn50/     ← Core 的 AppPaths.models_dir
+├── vision_model.onnx        146.1 MB
+├── text_model.onnx          147.6 MB
+└── vocab.txt                  0.1 MB
+```
+
+为什么不放插件数据目录：插件数据目录是**按插件隔离**的，两个插件要用同一个模型
+就会各存一份（中文 CLIP 一份 294 MB）。模型是跨插件共享资源。
+
+**插件不知道任何模型路径。** 落点是注册机制：
+
+1. 插件只做 `ctx.ai.register(ChineseClipProvider())` —— 连模型名都不提；
+2. Core 在注册时调用 `bind_models(models_dir)`，把共享目录交给 Provider；
+3. Provider 用**自己知道的** `MODEL_ID` 从该目录往下解析。
+
+路径拼接只在 Provider 内部的一处（`self.model_dir`），换存放位置只改 Core。
+
+## 模型缺失时
+
+`available()` 返回 **False**，且 `supports()` **不声明能力** —— 否则 `AIService`
+的路由会选到这个 Provider，然后必然失败（库里可能还有另一个真能干的 Provider）。
+真正调用时抛 `ChineseClipUnavailable`，消息里给**绝对路径 + 获取方式**。
 """
 
 from __future__ import annotations
@@ -232,27 +254,35 @@ def preprocess_image(path: str, size: int = IMAGE_SIZE) -> Any:
 
 # ---------------------------------------------------------------- Provider
 class ChineseClipProvider(ModelProvider):
-    """中文 CLIP 的本地 ONNX 实现。懒加载：构造时不碰磁盘、不加载模型。"""
+    """中文 CLIP 的本地 ONNX 实现。懒加载：构造时不碰磁盘、不加载模型。
+
+    模型位置**由 Core 在注册时注入**（`bind_models`），插件不传路径、也不知道路径。
+    """
 
     name = "chinese_clip"
     capabilities = frozenset({AICapability.IMAGE_EMBEDDING, AICapability.EMBEDDING})
 
-    def __init__(self, model_dir: Path | str | None = None) -> None:
-        self.model_dir = Path(model_dir) if model_dir else None
+    def __init__(self) -> None:
+        self._models_root: Path | None = None
         self._vision: Any = None
         self._text: Any = None
         self._tokenizer: BertWordPieceTokenizer | None = None
         self._failed: str = ""
 
+    # ---------- 注册机制：Core 注入共享模型目录 ----------
+    def bind_models(self, models_dir: Path) -> None:
+        """Core 在 `AIService.register()` 时调用。**这是拿模型位置的唯一途径。**"""
+        self._models_root = Path(models_dir)
+
+    @property
+    def model_dir(self) -> Path:
+        """本模型的实际位置。路径拼接只在**这一处** —— 换存放位置只改 Core。"""
+        root = self._models_root or Path("models")
+        return root / MODEL_ID
+
     # ---------- 就绪检查（必须便宜、不抛异常） ----------
     def _files(self) -> tuple[Path, Path, Path]:
         base = self.model_dir
-        if base is None:
-            raise ChineseClipUnavailable(
-                "未配置中文 CLIP 模型目录。请在插件配置里设置 clip_model_dir，"
-                "或用 scripts/export_chinese_clip_onnx.py 导出后放到插件数据目录的"
-                " models/chinese-clip-rn50/ 下。"
-            )
         return (
             base / "vision_model.onnx",
             base / "text_model.onnx",
@@ -260,10 +290,9 @@ class ChineseClipProvider(ModelProvider):
         )
 
     def configured(self) -> bool:
-        try:
-            return all(path.is_file() for path in self._files())
-        except ChineseClipUnavailable:
+        if self._models_root is None:
             return False
+        return all(path.is_file() for path in self._files())
 
     def available(self) -> bool:
         """文件齐 + onnxruntime 可导入。**不抛异常**。"""
@@ -288,7 +317,10 @@ class ChineseClipProvider(ModelProvider):
 
     def describe(self, *, probe: bool = True) -> dict[str, Any]:
         data = super().describe(probe=probe)
-        data["model_dir"] = str(self.model_dir) if self.model_dir else ""
+        data["model_dir"] = str(self.model_dir)
+        data["model_files"] = {
+            path.name: ("存在" if path.is_file() else "缺失") for path in self._files()
+        }
         if self._failed:
             data["error"] = self._failed
         return data
@@ -303,20 +335,25 @@ class ChineseClipProvider(ModelProvider):
         # **先查模型文件**再查运行时依赖：文件缺失是更常见、也更可操作的原因，
         # 报错应该先指向它，而不是甩一句"缺 onnxruntime"。
         vision_file, text_file, vocab_file = self._files()
-        for path in (vision_file, text_file, vocab_file):
-            if not path.is_file():
-                self._failed = (
-                    f"中文 CLIP 模型文件缺失：{path}\n"
-                    "用 scripts/export_chinese_clip_onnx.py 导出，"
-                    "或把 clip_model_dir 指向已导出的目录。"
-                )
-                raise ChineseClipUnavailable(self._failed)
+        missing = [p for p in (vision_file, text_file, vocab_file) if not p.is_file()]
+        if missing:
+            self._failed = (
+                f"中文 CLIP 模型不存在：{self.model_dir}\n"
+                f"缺失文件：{[p.name for p in missing]}\n"
+                "获取方式（在**开发机**上跑一次，模型不随插件包分发）：\n"
+                "  python scripts/export_chinese_clip_onnx.py "
+                f'--out "{self.model_dir}"\n'
+                "该目录是 Core 级共享资源，所有插件共用一份；"
+                "插件不携带模型，也不知道模型路径。"
+            )
+            raise ChineseClipUnavailable(self._failed)
 
         try:
             import onnxruntime as ort
         except ImportError as exc:
             self._failed = (
-                "缺少 onnxruntime，无法运行本地中文 CLIP 模型：pip install onnxruntime"
+                "缺少 onnxruntime，无法运行本地中文 CLIP 模型："
+                "pip install onnxruntime numpy pillow"
             )
             raise ChineseClipUnavailable(self._failed) from exc
 
@@ -375,20 +412,11 @@ class ChineseClipProvider(ModelProvider):
         return EmbeddingResult(vectors=vectors, provider=self.name, model=MODEL_ID)
 
 
-def find_model_dir(configured: str | None, data_dir: Path) -> Path | None:
-    """解析模型目录：显式配置优先，其次插件数据目录下的默认位置。"""
-    if configured:
-        return Path(configured).expanduser()
-    default = Path(data_dir) / "models" / MODEL_ID
-    return default if default.is_dir() else None
-
-
 __all__ = [
     "CONTEXT_LENGTH",
+    "BertWordPieceTokenizer",
     "ChineseClipProvider",
     "ChineseClipUnavailable",
-    "BertWordPieceTokenizer",
     "MODEL_ID",
-    "find_model_dir",
     "preprocess_image",
 ]

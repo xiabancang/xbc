@@ -58,6 +58,19 @@ class ModelProvider(ABC):
         """当前是否真的可用（服务在跑、凭证齐备）。**不得抛异常**。"""
 
     # ---------- 可选覆盖 ----------
+    def bind_models(self, models_dir: Path) -> None:
+        """Core 在注册时告诉 Provider：**共享模型目录**在哪。
+
+        这就是"模型路径解析由 Core / 注册机制负责"的落点：
+
+        - **插件不知道任何模型路径**，它只注册 Provider；
+        - **Provider 自己知道需要哪个模型**，从 `models_dir` 往下解析；
+        - 换存放位置只改 Core 一处。
+
+        默认实现什么都不做 —— 不依赖本地模型的 Provider（如走 HTTP 的 Ollama）
+        不需要覆盖它。需要本地模型的实现应该把它存下来，供后续使用。
+        """
+
     def configured(self) -> bool:
         """配置是否齐备。**不看服务在不在**，也**不联网** —— 必须便宜。"""
         return True

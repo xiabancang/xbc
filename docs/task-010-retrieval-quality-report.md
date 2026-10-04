@@ -115,6 +115,106 @@ TASK-009 的向量由 `answer + labels` 算出，**但库里只存了 `labels`**
 > 对照参考：amon-hen 的 MobileCLIP2 结论**正好相反**（它发现拉伸会损失 0.03 余弦而改用裁切）。
 > **不同模型的预处理要求相反，必须按各自官方实现来。**
 
+### 2.5 模型分发策略（TASK-010 补充约束）
+
+约束：**模型不随 `.xbcplugin` 包分发；作为 Core 级共享资源放固定位置；
+插件只声明"需要 embedding 能力"，不声明"需要模型文件"；路径解析由 Core / 注册机制负责。**
+
+#### 1）存放路径策略
+
+```
+<数据根>/models/chinese-clip-rn50/        ← AppPaths.models_dir（新增）
+├── vision_model.onnx        146.1 MB
+├── text_model.onnx          147.6 MB
+└── vocab.txt                  0.1 MB
+```
+
+**为什么不放插件数据目录**：插件数据目录是**按插件隔离**的。
+两个插件要用同一个模型就会各存一份（中文 CLIP 一份 **294 MB**）。
+模型是**跨插件共享资源**，所以提到 Core 层，与 TASK-006 定下的
+"用户数据与插件目录分离"同一条原则 —— 它既不随插件包分发，也不属于任何插件。
+
+代码：`AppPaths.models_dir`（新增，并纳入 `ensure()` 的目录创建）。
+
+#### 2）插件如何知道模型在哪 —— **它不知道**
+
+落点是**注册机制**，三步：
+
+| 步骤 | 谁做 | 做什么 |
+|---|---|---|
+| ① | 插件 | `ctx.ai.register(ChineseClipProvider())` —— **连模型名都不提** |
+| ② | Core | `AIService.register()` 调用 `provider.bind_models(models_dir)` 注入共享目录 |
+| ③ | Provider | 用自己知道的 `MODEL_ID` 从该目录解析：`model_dir = models_root / MODEL_ID` |
+
+**路径拼接只存在于 Provider 内部的一处**（`ChineseClipProvider.model_dir`）。
+换存放位置只改 Core 的 `AppPaths.models_dir`，Provider 和插件都不用动。
+
+**证据**：
+
+```
+1) 存放路径   : AppPaths.models_dir = <root>\models
+2) 解析职责   : AIService.model_dir('x') = <root>\models\x
+               ModelProvider.bind_models 存在: True
+3) 插件声明   : 配置项 ['annotate_frames_per_shot','frame_width','keyframes_per_shot',
+                       'max_shots','min_shot_seconds','scene_threshold']
+               含模型相关配置: （无）
+```
+
+**插件清单里已经没有 `clip_model_dir`** —— 上一版有，按约束删掉了。
+端到端复测时 `plugins.json` 里**完全不写 `video_analyzer` 项**，插件照样找到了模型。
+
+#### 3）模型缺失时的错误处理
+
+三层递进，都在**零配置**前提下成立：
+
+| 层 | 行为 |
+|---|---|
+| `configured()` | 文件不齐 → `False`（便宜、不抛异常） |
+| `available()` | `configured()` 为假 → `False` |
+| `supports()` | **不声明 `IMAGE_EMBEDDING`/`EMBEDDING`** —— 否则 `AIService` 路由会选到这个必然失败的 Provider（库里可能还有另一个真能干的） |
+| 真正调用时 | 抛 `ChineseClipUnavailable`，消息给出**绝对路径 + 缺失文件 + 获取命令** |
+
+`library_status` 的 `image_embedding` 字段把状态摆出来：
+
+```json
+// 模型就绪
+{ "available": true, "provider": "chinese_clip",
+  "model_dir": "<root>\\models\\chinese-clip-rn50",
+  "model_files": {"vision_model.onnx": "存在", "text_model.onnx": "存在", "vocab.txt": "存在"} }
+
+// 模型缺失（目录改名后实测）
+{ "available": false,
+  "reason": "没有 Provider 支持 image_embedding；已装配: ['chinese_clip','ollama']",
+  "hint": "图片向量这条路停用了；标签检索与文本向量照常工作。要启用：python
+           scripts/export_chinese_clip_onnx.py --out \"<root>\\models\\chinese-clip-rn50\"" }
+```
+
+调用时的错误消息：
+
+```
+中文 CLIP 模型不存在：<root>\models\chinese-clip-rn50
+缺失文件：['vision_model.onnx', 'text_model.onnx', 'vocab.txt']
+获取方式（在**开发机**上跑一次，模型不随插件包分发）：
+  python scripts/export_chinese_clip_onnx.py --out "<root>\models\chinese-clip-rn50"
+该目录是 Core 级共享资源，所有插件共用一份；插件不携带模型，也不知道模型路径。
+```
+
+**降级是干净的**：模型缺失只停用"图片向量"这一条路，
+标签检索与文本向量照常工作（实测：删掉模型目录后插件仍 `active`、其余工具正常）。
+
+#### 端到端复测（新分发机制下）
+
+```
+共享模型目录 <root>/models/chinese-clip-rn50（293.8 MB）
+插件配置     plugins.json —— 不写任何 video_analyzer 项
+插件         active
+入库         8 视频 / 14 镜头 / 56 向量 / auditable true
+图片空间     top-1 10/10   前3 10/10   53 ms/查询
+文本空间     top-1  3/10   前3  4/10  397 ms/查询
+```
+
+**模型位置改动后检索质量不变**（10/10），说明这次调整只动了"模型在哪"，没动"怎么算"。
+
 ---
 
 ## 3. 第三部分：双路融合 —— 实测表明**不该做**
@@ -168,7 +268,10 @@ TASK-009 的向量由 `answer + labels` 算出，**但库里只存了 `labels`**
 
 ## 5. Core 改动范围
 
-TASK-010 按裁决**扩张了 Core 的 embedding 能力以支持图片输入**。
+TASK-010 按裁决**扩张了 Core 的 embedding 能力以支持图片输入**，
+并按补充约束增加了**共享模型目录与注册期注入**。
+
+### 5.1 图片嵌入能力
 
 | 文件 | 改动 |
 |---|---|
@@ -178,9 +281,21 @@ TASK-010 按裁决**扩张了 Core 的 embedding 能力以支持图片输入**�
 | `capabilities/ai/service.py` | +19 −2：`AIService.embed_images()` 按能力路由 |
 | `capabilities/ai/__init__.py` | +9 −3：导出新类型 |
 
-**合计 +79 −10 行；`capabilities/ai/` 之外的内核文件 0 改动。**
+### 5.2 模型分发（补充约束）
 
-### 为什么请求分两个类型、结果共用一个
+| 文件 | 改动 |
+|---|---|
+| `core/paths.py` | +16 −0：新增 `AppPaths.models_dir`（`<数据根>/models`），纳入 `ensure()` |
+| `core/capabilities/ai/provider.py` | +13 −0：新增 `ModelProvider.bind_models()`（默认空实现） |
+| `core/capabilities/ai/service.py` | +43 −4：`AIService` 持有 `models_dir`；`register()` 调用 `bind_models`；新增 `model_dir()` 解析器 |
+| `core/context.py` | +3 −1：装配时把 `paths.models_dir` 传给 `build_ai_service` |
+
+**合计：9 个文件、约 +154 −15 行。`capabilities/ai/` 之外只动了 `paths.py` 与 `context.py`
+两个装配层文件**（都是加参数/加属性，没有改既有语义）。
+
+### 5.3 两个设计决定
+
+**请求分两个类型、结果共用一个**
 
 沿用项目既有的"一个字段不承载两种语义"：
 
@@ -189,10 +304,19 @@ TASK-010 按裁决**扩张了 Core 的 embedding 能力以支持图片输入**�
 - **结果共用**（`EmbeddingResult`）—— 载荷完全同构（`vectors[i]` 对应第 i 项、
   `provider`/`model`/`dim` 含义相同、跨 Provider 约束相同），分成两个结构只制造重复
 
-### 为什么把"文本向量化"和"图片向量化"分成两个能力
+**文本向量化与图片向量化是两个能力**
 
 文本嵌入服务（`nomic-embed-text`）和图片嵌入模型（中文 CLIP）是两个不同的东西。
 声明成同一个能力，**路由会选错 Provider** —— 一个只做文本的服务会被挑去编码图片。
+
+### 5.4 为什么用 `bind_models` 而不是让插件传路径
+
+插件传路径（`ChineseClipProvider(ctx.ai.models_dir / "…")`）也能工作，
+但那样**"这个插件需要哪个模型"这件事就写在了插件里**，
+与补充约束"插件只声明需要 embedding 能力"不符。
+
+`bind_models` 把关系反过来：**源码里只有 Provider 提模型**，
+插件那一行是 `ctx.ai.register(ChineseClipProvider())` —— 它连模型名都不提。
 
 ---
 

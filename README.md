@@ -1,4 +1,4 @@
-# 夏半仓工具箱（XBC）
+﻿# 夏半仓工具箱（XBC）
 
 一个**可插件化**的 Windows 本地工具平台内核。
 
@@ -59,7 +59,7 @@ XBC/
 │  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + ctx.ai 画面理解 + 素材资产库
 │  ├─ ai_test_plugin/        AI 能力层验收插件
 │  ├─ knowledge_base/        本地文档知识库（非本项目产物，未纳入版本管理）
-├─ tests/                    373 项测试
+├─ tests/                    378 项测试
 ├─ scripts/                  一次性运维脚本（如导出中文 CLIP 的 ONNX）
 └─ docs/                     技术方案、测试报告、调研报告
 ```
@@ -112,7 +112,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 373 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 378 tests / OK
 ```
 
 ---
@@ -405,12 +405,16 @@ TASK-010 换成图片本身嵌入后 **top-1 从 2/10 提升到 10/10**。
 **启用图片检索**（可选，缺失时自动降级为只看文本空间）：
 
 ```powershell
-# 1) 一次性导出 ONNX（Apache-2.0 权重；导出用 torch，运行不用）
-python scripts/export_chinese_clip_onnx.py --out D:\models\chinese-clip-rn50
-# 2) 运行时依赖
+# 1) 运行时依赖
 pip install onnxruntime numpy pillow
-# 3) 插件配置在 plugins.json（不在 config.json）
-#    {"plugins": {"video_analyzer": {"config": {"clip_model_dir": "D:/models/chinese-clip-rn50"}}}}
+
+# 2) 一次性导出模型到 **Core 共享模型目录**（导出用 torch，运行不用）
+#    模型不随 .xbcplugin 包分发，也不放插件目录 —— 所有插件共用一份
+python scripts/export_chinese_clip_onnx.py --out "$env:LOCALAPPDATA\夏半仓工具箱\models\chinese-clip-rn50"
+
+# 3) 不需要任何插件配置：插件只声明"需要能编码图片的 Provider"，
+#    模型位置由 Core 在注册时注入（ModelProvider.bind_models）
+python run.py tool call library_status   # 看 image_embedding 字段确认就绪
 ```
 
 报告：[《TASK-010 交付报告》](docs/task-010-retrieval-quality-report.md) ·

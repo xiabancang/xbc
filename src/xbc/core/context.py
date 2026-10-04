@@ -332,7 +332,9 @@ class AppContext:
         )
         # 先建 settings：AI 的 API Key 要从 secrets.json 取，不能进配置文件
         settings = SettingsCapability(config, paths.secrets_file, logger)
-        ai = build_ai_service(config, logger, secrets=settings)
+        ai = build_ai_service(
+            config, logger, secrets=settings, models_dir=paths.models_dir
+        )
         events = EventBus(logger)
 
         hooks = HookRelay(logger)

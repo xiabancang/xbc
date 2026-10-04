@@ -48,8 +48,7 @@ from xbc.core.capabilities.ai import (
 from xbc.core.contract.plugin import XbcPlugin
 
 # 模块名带 xbc_va_ 前缀，避免与其他插件撞名（插件共享同一个 sys.modules）
-from xbc_va_clip import MODEL_ID as CLIP_MODEL_ID
-from xbc_va_clip import ChineseClipProvider, find_model_dir
+from xbc_va_clip import ChineseClipProvider
 from xbc_va_library import Library, LibraryError, cosine  # noqa: E402
 
 #: 从 ffmpeg showinfo 输出里取时间戳（V18 同款正则）
@@ -152,13 +151,14 @@ class VideoAnalyzerPlugin(XbcPlugin):
         self._cfg = dict(config)
 
         # 把本地中文 CLIP 注册成 Core 的一个 AI Provider。
-        # 注册后**业务代码只通过 `ctx.ai.embed_images()` / `ctx.ai.provider(...)` 用它**，
-        # 推理本身发生在 Provider 里 —— 模型选择与失败语义都留在能力层。
+        #
+        # **插件只声明"需要一个能编码图片的 Provider"，不提任何模型文件**：
+        #   · 构造时不传路径 —— 插件不知道模型在哪，也不需要知道
+        #   · Core 在 register() 时通过 `bind_models` 注入共享模型目录
+        #   · Provider 用自己知道的 MODEL_ID 从那个目录往下解析
+        # 业务代码只通过 `ctx.ai.embed_images()` / `ctx.ai.provider(...)` 用它。
         # Provider 是懒加载的：构造时不碰磁盘、不加载模型。
-        self._clip = ChineseClipProvider(
-            find_model_dir(self._cfg.get("clip_model_dir"), ctx.data_dir)
-        )
-        ctx.ai.register(self._clip)
+        ctx.ai.register(ChineseClipProvider())
 
         path_schema = {"type": "string", "minLength": 1}
 
@@ -667,10 +667,37 @@ class VideoAnalyzerPlugin(XbcPlugin):
             return ""
         return f"内容哈希未变（{digest[:16]}）且状态为 ok"
 
+    def _image_capability_status(self) -> dict[str, Any]:
+        """图片嵌入这条路现在能不能走。
+
+        **问 Core 的路由**，而不是问插件自己注册的那个 Provider ——
+        否则"谁提供能力"的知识就被写死在插件里了。
+        """
+        try:
+            provider = self.ctx.ai.provider(capability=AICapability.IMAGE_EMBEDDING)
+        except AIError as exc:
+            return {
+                "available": False,
+                "reason": str(exc),
+                "hint": (
+                    "图片向量这条路停用了；标签检索与文本向量照常工作。"
+                    "要启用：python scripts/export_chinese_clip_onnx.py"
+                    f' --out "{self.ctx.ai.model_dir("chinese-clip-rn50")}"'
+                ),
+            }
+        described = provider.describe(probe=False)
+        return {
+            "available": True,
+            "provider": provider.name,
+            "model_dir": described.get("model_dir", ""),
+            "model_files": described.get("model_files", {}),
+        }
+
     def library_status(self) -> dict[str, Any]:
         library = self._library()
         stats = library.stats()
         stats["spaces"] = self._library_spaces()
+        stats["image_embedding"] = self._image_capability_status()
         stats["not_ok"] = [
             {"path": row["path"], "status": row["status"], "error": row["error"]}
             for row in library.videos() if row["status"] != "ok"
