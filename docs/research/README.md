@@ -199,6 +199,62 @@ TASK-010（检索质量修复）决定采用 **`OFA-Sys/chinese-clip-rn50`**。�
 
 ---
 
+## TASK-010 架构裁决：远端模型 SDK vs 本地推理运行时
+
+**裁决日期**：2026-10-05　**触发**：TASK-010 引入"插件提供本地模型 Provider"
+
+TASK-010 §7 判定：**插件提供 Provider 实现时 `import onnxruntime` 不构成"插件直接调用模型 SDK"**。
+据此把 AI 能力隔离规则细化，并**落盘**到 [docs/harness-rules.md](../harness-rules.md)。
+
+### 裁决内容
+
+| # | 类别 | 规则 |
+|---|---|---|
+| 1 | **插件业务代码** | 禁止 import 远端模型 SDK（`openai`/`ollama`/`anthropic`/`litellm` 等）、禁止 import HTTP 客户端（`requests`/`httpx`/`aiohttp`/`urllib`/`http.client`）、禁止直接发起远端模型调用 |
+| 2 | **插件提供的 Provider 实现** | **允许** import 本地推理运行时（`onnxruntime` 等）；但**业务代码不得直接调用该 Provider**，必须经 `ctx.ai.*` 走 Core Capability |
+| 3 | **禁词表** | 远端 SDK / HTTP **保留**；本地推理运行时**不在禁词表内**，改为约束"**仅限 Provider 文件使用**" |
+
+### 判据
+
+**"是否绕过能力层去够远端模型"，不是"有没有出现某个词"。**
+
+### 本项目的实测核对（无需改代码）
+
+现有禁词表**本来就不含本地推理运行时**：
+
+```python
+FORBIDDEN_IN_PLUGINS = [
+    "openai", "ollama", "anthropic", "litellm",
+    "requests", "httpx", "aiohttp", "urllib", "http.client",
+]
+```
+
+所以第 3 条的"从禁词表移除"**在现有表上已经成立**。
+
+### 对登记表的影响（新增一栏判定）
+
+今后登记调研项目时，"架构冲突"栏若涉及"是否可以直接 import 某个库"，按本裁决分类：
+
+| 库的类型 | 例子 | 业务代码 | Provider 文件 |
+|---|---|---|---|
+| 远端模型 SDK | `openai` / `ollama` / `anthropic` | ❌ 禁止 | ❌ 禁止（改用 Core 的 Provider 抽象） |
+| HTTP 客户端 | `requests` / `httpx` | ❌ 禁止 | ⚠️ 仅当该 Provider 确实要连远端服务（Core 自带的 `providers/ollama.py` 就是这种，用的是标准库 `urllib`） |
+| **本地推理运行时** | `onnxruntime` | ❌ 禁止 | ✅ **允许** |
+| 通用计算库 | `numpy` / `pillow` | ⚠️ 视用途 | ✅ 允许 |
+
+### 本条对应的登记项
+
+`xbc_va_clip.py`（中文 CLIP 本地 ONNX Provider）—— **使用方式：采用**；
+**架构冲突：无**（import `onnxruntime` 属本裁决允许的第 2 类）。
+
+### 尚未机械化的部分
+
+"本地推理运行时仅限 Provider 文件使用"**目前只写在文档里，没有测试守着**。
+机械 enforce 需要新增检查（如：含本地运行时 import 的 `.py` 必须同时定义 `ModelProvider` 子类），
+属于新增代码 —— **本次未做**（要求只动规则文档）。
+
+---
+
 ## 逐项目说明
 
 ### pluggy
@@ -295,3 +351,27 @@ TASK-010（检索质量修复）决定采用 **`OFA-Sys/chinese-clip-rn50`**。�
 6. 若"采用"：说明重新封装到了哪个插件的哪个文件
 
 **没有这六项，调研不算完成。**
+
+### 第 5 栏（架构冲突）的判定补充：库的类型决定能不能 import
+
+TASK-010 裁决（见上文《TASK-010 架构裁决》、
+[harness-rules.md](../harness-rules.md)）之后，
+"架构冲突"栏在**涉及"能不能直接 import 某个库"**时，按库的类型判定：
+
+| 库的类型 | 业务代码 | Provider 文件 | 登记时怎么写 |
+|---|---|---|---|
+| **远端模型 SDK**（`openai`/`ollama`/`anthropic`/`litellm`） | ❌ 禁止 | ❌ 禁止 | 架构冲突栏写"**有**：与 AI 能力隔离冲突" |
+| **HTTP 客户端**（`requests`/`httpx`/`aiohttp`） | ❌ 禁止 | ⚠️ 仅当该 Provider 确实连远端服务 | 写清"用在哪一层" |
+| **本地推理运行时**（`onnxruntime` 等） | ❌ 禁止 | ✅ **允许** | 架构冲突栏写"**无**"（属允许项），但**必须写明放在哪个 Provider 文件** |
+| **通用计算库**（`numpy`/`pillow`） | ⚠️ 视用途 | ✅ 允许 | 按实际情况写 |
+
+**判据是"是否绕过能力层去够远端模型"，不是"有没有出现某个词"。**
+
+登记"采用"本地推理运行时的时候，**第 6 栏要写全三件事**（缺一不算登记）：
+
+1. 哪个 Provider 文件用它
+2. 业务代码如何经 `ctx.ai.*` 使用该 Provider（**不得直接调用**）
+3. 模型 / 运行时的**分发方式**（是否随插件包分发、放哪、缺失时怎么办）
+
+第 3 条见 TASK-010 的《模型分发策略》：模型是 **Core 级共享资源**
+（`AppPaths.models_dir`），**不随 `.xbcplugin` 包分发**，插件不声明"需要模型文件"。
