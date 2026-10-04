@@ -59,3 +59,30 @@ Host 必须获得用户明确同意才能外传数据、才能调用任何工具
 - 安全：https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices 、https://modelcontextprotocol.io/seps/1024-mcp-client-security-requirements-for-local-server-
 - 权威 schema（TypeScript 为准）：https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts
 - 生态：https://modelcontextprotocol.io/docs/2026-07-28/sdk 、https://modelcontextprotocol.io/registry/about （API：https://registry.modelcontextprotocol.io/v0/servers ）
+
+---
+
+## 调研合规记录
+
+按《调研结果的使用规则》（见 [README](README.md) 与 [TASKS.md](../../TASKS.md)）补齐四栏：
+
+| 项 | 内容 |
+|---|---|
+| 来源 | MCP 官方规范原文（`modelcontextprotocol.io/specification/**`，覆盖 `2024-11-05` 至 `2026-07-28`）、权威 schema `schema/2026-07-28/schema.ts`、SEP-1024 与安全最佳实践 |
+| **许可证** | **NOASSERTION** —— 规范仓库 `modelcontextprotocol/modelcontextprotocol` 被 GitHub 归类为非标准许可（`license.spdx_id = "NOASSERTION"`）。本报告**只读了公开规范文本，未取任何代码**；将来若要采用其代码，**必须先逐条读 `LICENSE`** |
+| 可商业使用 | 不适用（本报告不涉及采用）；**采用前须另行判定** |
+| **使用方式** | **参考** —— 只读公开规范，代码自己写 |
+| **架构冲突** | **有，且是结构性的**：MCP 是**客户端-服务端进程协议** —— 宿主拉起 stdio 子进程、`server/discover` 握手、独立的传输层与会话生命周期；夏半仓是**同进程插件 + 作用域隔离**。信任模型（跨进程边界 vs 同进程能力白名单）与生命周期（独立进程 vs 作用域释放）**都不同**。**未强行整合。** |
+| 代码去向 | **未取任何代码** |
+
+**借鉴点与自写程度**：
+
+| 借鉴点 | 夏半仓落地位置 | 自写程度 |
+|---|---|---|
+| 工具的 `inputSchema` 形态；`annotations` 只作提示 | `src/xbc/core/tools/registry.py` 的 `ToolSpec` | 全部自写 |
+| `elicitation` —— 需要用户补信息时向用户提问 | 工具授权回调 `approver(tool_name, risk, arguments)` | 全部自写 |
+| **安全教训**：`annotations` 是提示，**不得**用于安全决策 | 风险由内核按 `risk` 字段强制，不信插件自报 | 全部自写 |
+| SEP-1024：本地安装需用户知情同意、命令原文不得截断 | 插件安装流程与 `doctor` 的输出 | 全部自写 |
+
+**明确不整合**：跨进程 stdio 传输、`server/discover` 握手、以及 MCP 的会话式生命周期
+（夏半仓的插件生命周期是自己的状态机，不是 MCP 的会话模型）。

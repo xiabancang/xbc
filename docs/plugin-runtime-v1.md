@@ -743,3 +743,34 @@ XBC/
 
 - **uTools**：官方开发者文档（plugin.json / 文件结构 / preload / events / window / features / db / 打包发布）与官方 `utools-api-types` 内的 `utools.schema.json`。报告全文：[docs/research/utools-plugin-mechanism.md](research/utools-plugin-mechanism.md)。其中文档与 schema 不一致处（如 `feature.platform`、`dbStorage`）已按"存疑"处理，未做推测性补全。
 - **Dify Plugin**：官方文档（插件类型 / manifest 字段 / CLI）与 GitHub 仓库（`langgenius/dify` 的 `api/core/plugin/*`、`api/models/tools.py`、`api/core/helper/encrypter.py`；`dify-plugin-daemon`；`dify-plugin-sdks`）。
+
+---
+
+## 附录 B：调研合规记录
+
+按《调研结果的使用规则》补齐：**许可证 / 可商业使用 / 使用方式 / 架构冲突**四栏。
+完整登记表见 [docs/research/README.md](research/README.md)。
+
+> **代码层面核验**：本方案引用的五个项目，夏半仓**均未取其代码、也未引入其依赖**
+> （`ast` 扫描 45 个内核文件确认）。下表"使用方式"栏据此填写。
+
+| 参考项目 | 许可证 | 可商业使用 | 使用方式 | 架构冲突 |
+|---|---|---|---|---|
+| DeepSeek Harness | **未公开**（私有发行包） | — | **参考**：只读其插件开发说明，借鉴 Skill 分层与"能力声明" | **有**：其内核建在 Cordis DI 容器上；夏半仓选更轻的显式契约（清单 + Context 门面）。**未搬 DI** |
+| pluggy | **MIT** | ✅ | **参考**：只借鉴 hookspec / hookimpl 机制，实现自写 | 部分：其 `wrapper` / `historic` / entrypoints 等机制我们用不上，只取了一个子集 |
+| MCP | **NOASSERTION**（非标准许可） | ⚠️ 只读公开规范 | **参考**：只读公开规范文本与 schema | **有**：MCP 是客户端-服务端**进程协议**（宿主拉起 stdio 子进程 + `server/discover` 握手）；夏半仓是**同进程插件 + 作用域隔离**。信任与生命周期模型不同，**未强行整合** |
+| uTools | **闭源商业软件** | — | **参考**：只读官方开发者文档与 `utools-api-types` 的 schema | **有**：宿主是 Electron（Node/Web），插件是 HTML/JS + preload；其 **preload 全权模型**（安装即全权）与夏半仓"能力白名单 + 内核强制风险"**相反**。**未强行整合** |
+| Dify Plugin | **NOASSERTION**（非标准许可） | ⚠️ 采用前须逐条读 `LICENSE` | **参考**：只读官方文档与公开 manifest 字段说明，**未取代码** | **有**：Dify 是含账号 / 租户 / 云部署的**平台型**架构；夏半仓是**单机内核 + 插件**。强行整合会把平台复杂度引进内核，与"Core 保持最小化"冲突 |
+
+**与本方案的具体对应关系**：
+
+| 借鉴点 | 来自 | 落地位置 | 自写程度 |
+|---|---|---|---|
+| `hookspec` / `hookimpl` / `check_pending` | pluggy | `src/xbc/core/contract/hookspec.py` | 全部自写，不依赖 pluggy |
+| 声明式指令索引（关键词 / 正则 / 文件 / 窗口匹配） | uTools `features/cmds` | 清单 `commands` 字段（已声明校验，匹配待做） | 全部自写 |
+| 工具的 `inputSchema` 形态、`elicitation` 向用户补信息 | MCP | `ToolSpec.inputSchema` / 授权回调 | 全部自写 |
+| 插件 manifest 与权限声明 | Dify Plugin | `PluginManifest.capabilities` | 全部自写 |
+| Skill 分层（说明书而非代码） | DeepSeek Harness | `core/skills/catalog.py` | 全部自写 |
+
+**结论**：五个参考全部为「参考」级，**没有一项达到"采用"** —— 因此本方案没有引入任何第三方依赖，
+内核维持"零第三方依赖 + 不含 Qt"。

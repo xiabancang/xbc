@@ -8,6 +8,7 @@
 
 > 技术方案：[docs/plugin-runtime-v1.md](docs/plugin-runtime-v1.md)
 > 测试报告与验收结果：[docs/plugin-runtime-v1-test-report.md](docs/plugin-runtime-v1-test-report.md)
+> 调研台账与使用规则：[docs/research/README.md](docs/research/README.md)
 > 任务台账：[TASKS.md](TASKS.md)
 
 ![桌面管理入口：插件列表与状态、启用/停用、Tool 与 Skill 列表](docs/shell-preview.png)
