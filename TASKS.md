@@ -564,6 +564,9 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 `ctx.files` 缺二进制读取/哈希能力，插件做内容哈希只能直接 `open()`，未新增 Core 能力。
 
 📄 完整报告：[docs/task-009-video-library-v1-report.md](docs/task-009-video-library-v1-report.md)
+🔍 技术选型调研：[docs/research/vector-search-options.md](docs/research/vector-search-options.md)
+（向量检索候选与中文标签检索的补调研：六个候选全部可商用，但都因"插件零依赖"被排除；
+实测更正了交付报告里低估 4–22 倍的性能估算）
 
 ---
 
