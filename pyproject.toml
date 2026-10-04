@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xbc"
+version = "0.1.0"
+description = "夏半仓工具箱 —— 可插件化的 Windows 本地 AI 工具平台内核"
+readme = "README.md"
+requires-python = ">=3.10"
+# 内核刻意保持零第三方依赖：这样内核永远能跑起来，插件机制也能独立测试
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+
+[project.scripts]
+xbc = "xbc.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

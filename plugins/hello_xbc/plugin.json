@@ -1,0 +1,11 @@
+{
+  "id": "hello_xbc",
+  "name": "Hello XBC",
+  "version": "0.1.0",
+  "api_version": "1.0",
+  "entry": "plugin.py:HelloXbcPlugin",
+  "description": "最小验证插件：用于验证插件生命周期与公共能力调用，本身不含业务功能。",
+  "author": "夏半仓工具箱",
+  "capabilities": ["files", "settings", "ffmpeg", "ai"],
+  "actions": ["hello", "probe", "fail_on_purpose"]
+}
