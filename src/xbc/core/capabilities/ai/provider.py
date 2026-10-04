@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from .request import EmbeddingRequest, TextRequest, VisionRequest
+from .request import EmbeddingRequest, ImageEmbeddingRequest, TextRequest, VisionRequest
 from .types import (
     AICapability,
     AIError,
@@ -82,6 +82,18 @@ class ModelProvider(ABC):
 
     def embedding(self, request: EmbeddingRequest) -> EmbeddingResult:
         raise AIUnsupported(f"Provider {self.name!r} 不支持向量化（embedding）")
+
+    def embed_images(self, request: ImageEmbeddingRequest) -> EmbeddingResult:
+        """图片向量化。
+
+        与 `embedding()` 是**两种能力**（`AICapability.IMAGE_EMBEDDING` /
+        `AICapability.EMBEDDING`）。返回的是同一个 `EmbeddingResult` 结构，
+        但**图片向量与文本向量属于不同向量空间，不可互相比较**。
+
+        实现方可以只支持其中一种：不支持时这里的默认实现会抛出可读的 `AIUnsupported`，
+        调用方要在选 Provider 的那一刻就能得到理由，而不是等到算出结果才发现不兼容。
+        """
+        raise AIUnsupported(f"Provider {self.name!r} 不支持图片向量化（embed_images）")
 
     # ---------- 公共 ----------
     def supports(self, capability: AICapability) -> bool:

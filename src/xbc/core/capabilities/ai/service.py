@@ -34,7 +34,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .providers import OllamaProvider, OpenAICompatibleProvider
-from .request import EmbeddingRequest, TextRequest, VisionRequest
+from .request import EmbeddingRequest, ImageEmbeddingRequest, TextRequest, VisionRequest
 from .types import (
     AICapability,
     AIError,
@@ -184,13 +184,30 @@ class AIService:
         )
 
     def embedding(self, texts: list[str] | str) -> EmbeddingResult:
-        """向量化。输入：一段或多段文本。
+        """文本向量化。输入：一段或多段文本。
 
         **返回值不可跨 Provider / 跨模型混用** —— 详见 `types.py` 开头那一段。
         """
         items = [texts] if isinstance(texts, str) else list(texts)
         chosen = self.provider(capability=AICapability.EMBEDDING)
         return chosen.embedding(EmbeddingRequest(texts=[str(t) for t in items]))
+
+    def embed_images(self, images: list[str] | str) -> EmbeddingResult:
+        """图片向量化。输入：**本地图片路径**（单个或一组）。
+
+        只接受本地路径 —— 与 `vision_analyze` 同一条规矩，传 base64 / URL 会明确报错。
+
+        与 `embedding()` 是**两种能力**，按 `AICapability.IMAGE_EMBEDDING` 路由 ——
+        一个只做文本嵌入的 Provider（如 `nomic-embed-text`）不会被误选，
+        而是抛出可读的 `AIUnsupported`。
+
+        **返回的向量与文本向量属于不同向量空间，绝对不可互相比较。**
+        """
+        items = [images] if isinstance(images, str) else list(images)
+        chosen = self.provider(capability=AICapability.IMAGE_EMBEDDING)
+        return chosen.embed_images(
+            ImageEmbeddingRequest(images=[str(p) for p in items])
+        )
 
 
 def build_ai_service(config: Any, logger: Any = None, secrets: Any = None) -> AIService:

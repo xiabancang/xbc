@@ -31,14 +31,14 @@ v1 只存了 `labels`，但向量其实是由 `answer + labels` 算出来的 —
 
 | 列 | 作用 |
 |---|---|
-| `embed_text` | **真正被嵌入的原始文本**（可审计） |
+| `embed_input` | **真正被嵌入的输入**（可审计）：文本向量存原文，图片向量存图片路径 |
 | `kind` | `frame`（单帧）/ `shot_centroid`（多帧质心），避免把质心当成单帧文本 |
 | `created_at` | 向量产生时间（可追溯） |
 
 配合既有的 `vectors.provider` / `vectors.model` / `videos.file_hash` / `videos.analyzed_at`，
 一次检索结果可以被完整解释。**
 
-旧库（v1）升级时这三列会被补上，但 `embed_text` 只能是空字符串 ——
+旧库（v1）升级时这三列会被补上，但 `embed_input` 只能是空字符串 ——
 **已经算过的向量无法反推原文**，所以旧库需要重新入库才能获得可审计性。
 """
 
@@ -52,7 +52,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -109,32 +109,45 @@ CREATE TABLE IF NOT EXISTS labels (
 CREATE INDEX IF NOT EXISTS idx_labels_text ON labels(text);
 CREATE INDEX IF NOT EXISTS idx_labels_shot ON labels(shot_id);
 
-CREATE TABLE IF NOT EXISTS vectors (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    shot_id    INTEGER NOT NULL REFERENCES shots(id) ON DELETE CASCADE,
-    frame_id   INTEGER NOT NULL DEFAULT 0,
-    -- 'frame' = 单帧向量；'shot_centroid' = 该镜头多帧向量的质心
-    kind       TEXT    NOT NULL DEFAULT 'frame',
-    provider   TEXT    NOT NULL,
-    model      TEXT    NOT NULL,
-    dim        INTEGER NOT NULL,
-    vector     BLOB    NOT NULL,
-    -- **真正被嵌入的原始文本**。TASK-009 只存了 labels，
-    -- 而向量其实是由 answer + labels 算出来的 —— 导致检索行为无法审计。
-    -- 这一列是 TASK-010 的核心修复。
-    embed_text TEXT    NOT NULL DEFAULT '',
-    created_at TEXT    NOT NULL DEFAULT '',
-    UNIQUE(shot_id, frame_id)
-);
-CREATE INDEX IF NOT EXISTS idx_vectors_shot ON vectors(shot_id);
 """
 
-#: 从 v1 升到 v2 要补的列（旧库缺这三列，且无法反推 embed_text）
-MIGRATIONS_V2 = (
-    ("kind", "ALTER TABLE vectors ADD COLUMN kind TEXT NOT NULL DEFAULT 'frame'"),
-    ("embed_text", "ALTER TABLE vectors ADD COLUMN embed_text TEXT NOT NULL DEFAULT ''"),
-    ("created_at", "ALTER TABLE vectors ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
+#: `vectors` 的建表语句单独拆出来 —— 迁移时要**重建**这张表
+#: （SQLite 改不了已有约束），所以需要能单独执行它。
+VECTORS_DDL = """
+CREATE TABLE IF NOT EXISTS vectors (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    shot_id     INTEGER NOT NULL REFERENCES shots(id) ON DELETE CASCADE,
+    frame_id    INTEGER NOT NULL DEFAULT 0,
+    -- 'frame' = 单帧向量；'shot_centroid' = 该镜头多帧向量的质心
+    kind        TEXT    NOT NULL DEFAULT 'frame',
+    provider    TEXT    NOT NULL,
+    model       TEXT    NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB    NOT NULL,
+    -- **真正被嵌入的输入**：文本向量存原文，图片向量存图片路径。
+    -- TASK-009 只存了 labels，而向量其实是由 answer + labels 算出来的 ——
+    -- 导致检索行为无法审计。这一列是 TASK-010 的核心修复。
+    embed_input TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL DEFAULT '',
+    -- 一个帧可以同时有**多个向量空间的向量**（中文 CLIP 图片向量 + Caption 文本向量）。
+    -- 它们维度可能相同、但语义空间不同，绝不可互相比较 ——
+    -- 所以唯一键必须带上 provider + model，而不是只按 (shot_id, frame_id)。
+    UNIQUE(shot_id, frame_id, provider, model)
+);
+CREATE INDEX IF NOT EXISTS idx_vectors_shot ON vectors(shot_id);
+CREATE INDEX IF NOT EXISTS idx_vectors_space ON vectors(provider, model);
+"""
+
+DDL = DDL + VECTORS_DDL
+
+#: `vectors` 表的目标列集合（迁移用它判断要不要重建表）
+VECTOR_COLUMNS = (
+    "id", "shot_id", "frame_id", "kind", "provider", "model",
+    "dim", "vector", "embed_input", "created_at",
 )
+
+#: 目标唯一键的列顺序
+VECTOR_UNIQUE_COLUMNS = ["shot_id", "frame_id", "provider", "model"]
 
 
 class LibraryError(RuntimeError):
@@ -221,20 +234,69 @@ class Library:
             ) from exc
 
     @staticmethod
-    def _migrate(connection: sqlite3.Connection) -> list[str]:
-        """把旧库补到当前 schema。返回实际补了哪些列。
+    def _has_space_unique(connection: sqlite3.Connection) -> bool:
+        """`vectors` 的唯一键是否已经是 `(shot_id, frame_id, provider, model)`。"""
+        for index in connection.execute("PRAGMA index_list(vectors)").fetchall():
+            if not index["unique"]:
+                continue
+            columns = [
+                row["name"]
+                for row in connection.execute(f"PRAGMA index_info({index['name']})")
+            ]
+            if columns == VECTOR_UNIQUE_COLUMNS:
+                return True
+        return False
 
-        `CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，所以老库必须走这里。
-        `embed_text` 补上后是空串 —— **已算过的向量无法反推原文**，
-        旧库要重新入库才有可审计性（`schema_note` 会如实说明）。
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> list[str]:
+        """把旧库补到当前 schema。返回实际做了哪些迁移动作。
+
+        `CREATE TABLE IF NOT EXISTS` **既不会加列、也不会改约束**，所以老库必须走这里。
+
+        v1 / v2 的 `vectors` 有两个问题：
+
+        1. 缺少审计列（`kind` / `embed_input` / `created_at`）
+        2. `UNIQUE(shot_id, frame_id)` 只允许每帧**一条**向量 —— 而 TASK-010 要让
+           **中文 CLIP 图片向量**与 **Caption 文本向量**（两个不同向量空间）共存
+
+        SQLite 改不了已有约束，所以走**重建表 + 搬数据**。
+        `embed_input` 搬过来是空串 —— **已算过的向量无法反推输入**，
+        旧库要重新入库才有可审计性（`stats()['note']` 会如实说明）。
         """
-        existing = {row["name"] for row in connection.execute("PRAGMA table_info(vectors)")}
-        added: list[str] = []
-        for column, statement in MIGRATIONS_V2:
-            if column not in existing:
-                connection.execute(statement)
-                added.append(column)
-        return added
+        existing = {
+            row["name"] for row in connection.execute("PRAGMA table_info(vectors)")
+        }
+        if not existing:
+            return []  # executescript 刚建好的就是目标结构
+
+        if set(VECTOR_COLUMNS) <= existing and Library._has_space_unique(connection):
+            return []
+
+        actions: list[str] = []
+        # v2 的中间版本把这一列叫 embed_text（那时只考虑文本向量），统一搬到 embed_input
+        source = (
+            "embed_text"
+            if "embed_text" in existing and "embed_input" not in existing
+            else "embed_input"
+        )
+        if source != "embed_input":
+            actions.append("rename:embed_text->embed_input")
+
+        kind_expr = "kind" if "kind" in existing else "'frame'"
+        input_expr = source if source in existing else "''"
+        created_expr = "created_at" if "created_at" in existing else "''"
+
+        connection.execute("ALTER TABLE vectors RENAME TO vectors_pre_t10")
+        connection.executescript(VECTORS_DDL)
+        connection.execute(
+            "INSERT INTO vectors (id, shot_id, frame_id, kind, provider, model,"
+            " dim, vector, embed_input, created_at)"
+            f" SELECT id, shot_id, frame_id, {kind_expr}, provider, model,"
+            f" dim, vector, {input_expr}, {created_expr} FROM vectors_pre_t10"
+        )
+        connection.execute("DROP TABLE vectors_pre_t10")
+        actions.append("rebuild:vectors(unique=shot_id,frame_id,provider,model)")
+        return actions
 
     def exists(self) -> bool:
         return self.path.is_file()
@@ -341,41 +403,39 @@ class Library:
                         (shot_id, 0, str(text)),
                     )
 
-                for vector in shot.get("frame_vectors", []):
-                    index = int(vector.get("frame_index", -1))
-                    frame_id = frame_ids[index] if 0 <= index < len(frame_ids) else 0
+                def _put(vector: dict[str, Any], frame_id: int, kind: str) -> None:
+                    """写一条向量。**唯一键含 provider+model**，所以不同向量空间可共存。"""
                     connection.execute(
                         "INSERT OR REPLACE INTO vectors(shot_id, frame_id, kind, provider,"
-                        " model, dim, vector, embed_text, created_at)"
-                        " VALUES(?,?,'frame',?,?,?,?,?,?)",
+                        " model, dim, vector, embed_input, created_at)"
+                        " VALUES(?,?,?,?,?,?,?,?,?)",
                         (
                             shot_id,
                             frame_id,
+                            kind,
                             str(vector["provider"]),
                             str(vector["model"]),
                             int(vector["dim"]),
                             pack_vector(vector["values"]),
-                            str(vector.get("embed_text", "")),
+                            str(vector.get("embed_input", "")),
                             str(vector.get("created_at") or now()),
                         ),
                     )
 
-                shot_vector = shot.get("vector")
-                if shot_vector:
-                    connection.execute(
-                        "INSERT OR REPLACE INTO vectors(shot_id, frame_id, kind, provider,"
-                        " model, dim, vector, embed_text, created_at)"
-                        " VALUES(?,0,'shot_centroid',?,?,?,?,?,?)",
-                        (
-                            shot_id,
-                            str(shot_vector["provider"]),
-                            str(shot_vector["model"]),
-                            int(shot_vector["dim"]),
-                            pack_vector(shot_vector["values"]),
-                            str(shot_vector.get("embed_text", "")),
-                            str(shot_vector.get("created_at") or now()),
-                        ),
-                    )
+                # 每个向量空间各写一组：Caption 文本向量（如 768 维）与
+                # 中文 CLIP 图片向量（1024 维）。它们维度可能相同、但空间不同，
+                # 靠 (provider, model) 区分 —— 检索时也按这个过滤，不会混算。
+                for key, kind in (("frame_vectors", "frame"),
+                                  ("clip_frame_vectors", "frame")):
+                    for vector in shot.get(key, []):
+                        index = int(vector.get("frame_index", -1))
+                        frame_id = frame_ids[index] if 0 <= index < len(frame_ids) else 0
+                        _put(vector, frame_id, kind)
+
+                for key in ("vector", "clip_vector"):
+                    shot_vector = shot.get(key)
+                    if shot_vector:
+                        _put(shot_vector, 0, "shot_centroid")
             return count
 
     # ---------------- 查询 ----------------
@@ -419,7 +479,7 @@ class Library:
                 "SELECT dim FROM vectors WHERE frame_id = 0 LIMIT 1"
             ).fetchone()
             auditable = connection.execute(
-                "SELECT COUNT(*) FROM vectors WHERE embed_text <> ''"
+                "SELECT COUNT(*) FROM vectors WHERE embed_input <> ''"
             ).fetchone()[0]
             kinds = {
                 row["kind"]: row["n"]
@@ -430,11 +490,11 @@ class Library:
         note = ""
         if total_vectors and not auditable:
             note = (
-                "库里所有向量都没有 embed_text（v1 旧库）—— "
+                "库里所有向量都没有 embed_input（v1 旧库）—— "
                 "已经算过的向量无法反推原文，需要重新入库（library_rebuild）才有可审计性。"
             )
         elif 0 < auditable < total_vectors:
-            note = f"有 {total_vectors - auditable} 条向量缺少 embed_text（v1 遗留），建议重新入库。"
+            note = f"有 {total_vectors - auditable} 条向量缺少 embed_input（v1 遗留），建议重新入库。"
         return {
             "library_path": str(self.path),
             "library_exists": self.exists(),
@@ -446,8 +506,9 @@ class Library:
             "distinct_labels": distinct_labels,
             "vectors": total_vectors,
             "vectors_by_kind": kinds,
-            "vectors_with_embed_text": auditable,
+            "vectors_with_embed_input": auditable,
             "auditable": bool(total_vectors) and auditable == total_vectors,
+            "spaces": self.spaces(),
             "schema_version": SCHEMA_VERSION,
             "vector_dim": dim["dim"] if dim else None,
             "note": note,
@@ -495,20 +556,61 @@ class Library:
         return [self._shot_row(row) for row in rows]
 
     # ---------------- 检索：语义 ----------------
-    def shot_vectors(self) -> list[dict[str, Any]]:
-        """全部镜头级向量（`frame_id = 0`），**带可审计的溯源信息**。"""
+    def spaces(self) -> list[dict[str, Any]]:
+        """库里一共有哪些**向量空间**（按 provider+model 分组）。
+
+        一个帧可以同时有多个空间的向量（Caption 文本 / 中文 CLIP 图片）。
+        **它们不可互相比较** —— 所以检索必须先选定一个空间，再在该空间内排序。
+        """
         sql = """
+            SELECT ve.provider, ve.model, ve.dim, ve.kind, COUNT(*) AS n
+              FROM vectors ve
+             GROUP BY ve.provider, ve.model, ve.dim, ve.kind
+             ORDER BY ve.provider, ve.model, ve.kind
+        """
+        with self.session() as connection:
+            rows = connection.execute(sql).fetchall()
+        grouped: dict[tuple, dict[str, Any]] = {}
+        for row in rows:
+            key = (row["provider"], row["model"])
+            entry = grouped.setdefault(key, {
+                "provider": row["provider"], "model": row["model"],
+                "dim": row["dim"], "vectors": 0, "frames": 0, "shot_centroids": 0,
+            })
+            entry["vectors"] += row["n"]
+            if row["kind"] == "shot_centroid":
+                entry["shot_centroids"] += row["n"]
+            else:
+                entry["frames"] += row["n"]
+        return list(grouped.values())
+
+    def shot_vectors(
+        self, *, provider: str | None = None, model: str | None = None
+    ) -> list[dict[str, Any]]:
+        """镜头级向量（`frame_id = 0`），**带可审计的溯源信息**。
+
+        `provider` / `model` 用于**选定向量空间** —— 传了就只返回该空间的向量。
+        """
+        clauses = ["ve.frame_id = 0"]
+        args: list[Any] = []
+        if provider is not None:
+            clauses.append("ve.provider = ?")
+            args.append(provider)
+        if model is not None:
+            clauses.append("ve.model = ?")
+            args.append(model)
+        sql = f"""
             SELECT ve.shot_id, ve.provider, ve.model, ve.dim, ve.vector,
-                   ve.kind, ve.embed_text, ve.created_at,
+                   ve.kind, ve.embed_input, ve.created_at,
                    s.shot_index, s.start_seconds, s.end_seconds, s.duration_seconds,
                    v.id AS video_id, v.path AS video_path
               FROM vectors ve
               JOIN shots  s ON s.id = ve.shot_id
               JOIN videos v ON v.id = s.video_id
-             WHERE ve.frame_id = 0
+             WHERE {' AND '.join(clauses)}
         """
         with self.session() as connection:
-            rows = connection.execute(sql).fetchall()
+            rows = connection.execute(sql, tuple(args)).fetchall()
         return [
             {
                 "shot_id": row["shot_id"],
@@ -522,7 +624,7 @@ class Library:
                 "model": row["model"],
                 "dim": row["dim"],
                 "kind": row["kind"],
-                "embed_text": row["embed_text"],
+                "embed_input": row["embed_input"],
                 "created_at": row["created_at"],
                 "values": unpack_vector(row["vector"]),
             }
@@ -538,7 +640,7 @@ class Library:
         """
         sql = """
             SELECT ve.id AS vector_id, ve.shot_id, ve.frame_id, ve.kind,
-                   ve.provider, ve.model, ve.dim, ve.embed_text, ve.created_at,
+                   ve.provider, ve.model, ve.dim, ve.embed_input, ve.created_at,
                    ve.vector,
                    s.shot_index, s.start_seconds, s.end_seconds,
                    v.path AS video_path, v.file_hash, v.analyzed_at
@@ -564,9 +666,9 @@ class Library:
                 "provider": row["provider"],
                 "model": row["model"],
                 "dim": row["dim"],
-                "embed_text": row["embed_text"],
-                "embed_text_chars": len(row["embed_text"] or ""),
-                "has_embed_text": bool(row["embed_text"]),
+                "embed_input": row["embed_input"],
+                "embed_input_chars": len(row["embed_input"] or ""),
+                "has_embed_input": bool(row["embed_input"]),
                 "created_at": row["created_at"],
                 "video_path": row["video_path"],
                 "video_hash": (row["file_hash"] or "")[:16],

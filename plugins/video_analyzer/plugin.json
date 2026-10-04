@@ -66,7 +66,7 @@
     },
     {
       "name": "library_search_semantic",
-      "description": "语义检索：输入自然语言，返回最相关的镜头（用 embedding 计算相似度）",
+      "description": "语义检索：输入自然语言，返回最相关的镜头。默认走图片向量空间（中文 CLIP）；space 可显式指定 image / text 用于对比",
       "risk": "read"
     },
     {
@@ -111,6 +111,11 @@
         "type": "integer",
         "default": 480,
         "minimum": 64
+      },
+      "clip_model_dir": {
+        "type": "string",
+        "default": "",
+        "description": "中文 CLIP（chinese-clip-rn50）ONNX 模型目录，内含 vision_model.onnx / text_model.onnx / vocab.txt。留空则用插件数据目录下的 models/chinese-clip-rn50。模型缺失时图片向量这条路自动停用，其余功能不受影响。"
       }
     }
   }

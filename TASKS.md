@@ -574,7 +574,7 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 
 | ID | 任务 | 前置 | 备注 |
 |---|---|---|---|
-| TASK-010 | **文案 → 镜头匹配**（⛔ 前置的检索质量修复**部分受阻待裁决**） | TASK-009 | 第一部分（存储缺陷）已完成；中文 CLIP 已导出验证但集成受阻于 Core 接口；见 [交付报告](docs/task-010-retrieval-quality-report.md) |
+| TASK-010 | **文案 → 镜头匹配**（⛔ 前置的检索质量修复已完成，等它开工） | TASK-009 | 检索 top-1 **2/10 → 10/10**；见 [交付报告](docs/task-010-retrieval-quality-report.md) |
 | TASK-011 | 图形界面二期：插件安装/卸载入口 + 配置编辑 | TASK-006 | 安装器是纯数据操作，界面直接调 `create_installer()` |
 | TASK-012 | 打包分发（PyInstaller） | TASK-008 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
 | TASK-013 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
@@ -602,3 +602,4 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 | 2026-10-05 | TASK-010 前置调研 | 视频语义检索方案选型：**本机活体实测三条路线**（同批 14 帧 / 同样 10 个中文查询）——中文 CLIP 6/10、现有 Caption 路线 2/10、MobileCLIP2 1/10（英文对照 5/5）；MobileCLIP2 中文失效已实证到 tokenizer 机制层；逐一核实 8 个项目的许可证（**MaterialSearch GPL-3.0 / VideoSeek AGPL-3.0 不可采用**；`chinese-clip-vit-base-patch16` **权重未声明许可证**）；产出《视频语义检索方案选型》调研报告 |
 | 2026-10-05 | TASK-010 第一部分 | **存储缺陷修复完成**：库 schema v1→v2，`vectors` 补 `embed_text`（真正被嵌入的原文）/ `kind` / `created_at`；新增 `library_audit` 工具（第 13 个）；旧库迁移后**如实标注 `auditable: false`**（旧向量无法反推原文）；重新入库后 28/28 可审计；实测坐实 TASK-009 缺陷（原来看不见的 `answer` 一直参与向量计算）；测试增至 **360 项** |
 | 2026-10-05 | TASK-010 第二/三部分 | **按任务书要求停下报告**：`chinese-clip-rn50`（Apache-2.0）已导出 ONNX 并验证**与 torch 余弦 1.00000000 精确等价**、**运行时不需要 torch**、维度 1024=1024、中文 top-1 **10/10**；但 Core 的 `EmbeddingRequest` 只收文本，**图片嵌入无法经 Core Capability** → 触发"改动 Core 需先报告"的闸门，未自行扩展。另：**等权 RRF 融合实测把 top-1 从 10/10 拉到 8/10**，如实报告建议**不做融合** |
+| 2026-10-05 | TASK-010 交付 | 按裁决（**扩 Core 支持图片嵌入 / 不做融合 / 294MB 可接受**）完成：Core 新增 `AICapability.IMAGE_EMBEDDING` + `ImageEmbeddingRequest` + `ModelProvider.embed_images()` + `AIService.embed_images()`（**5 文件 +79 −10 行，全在 capabilities/ai/ 内，AI 层外零改动**）；插件新增本地 ONNX Provider（`xbc_va_clip.py`，含**独立实现的 BERT 分词器，与官方 23/23 条等价**）；`vectors` 唯一键改为含 `provider+model`，**两个向量空间共存但不混算**；新增 `library_audit` 工具与 `scripts/export_chinese_clip_onnx.py`；**端到端实测 top-1 2/10 → 10/10**（目标 ≥6/10）；修 2 个真缺陷（能力声明与可用性不一致、插件自己判断能力）；测试增至 **373 项** |

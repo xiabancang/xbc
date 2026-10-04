@@ -59,7 +59,8 @@ XBC/
 │  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + ctx.ai 画面理解 + 素材资产库
 │  ├─ ai_test_plugin/        AI 能力层验收插件
 │  ├─ knowledge_base/        本地文档知识库（非本项目产物，未纳入版本管理）
-├─ tests/                    348 项测试
+├─ tests/                    373 项测试
+├─ scripts/                  一次性运维脚本（如导出中文 CLIP 的 ONNX）
 └─ docs/                     技术方案、测试报告、调研报告
 ```
 
@@ -111,7 +112,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 348 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 373 tests / OK
 ```
 
 ---
@@ -338,7 +339,7 @@ python -m venv .venv
 |---|---|---|
 | `hello_xbc` | 机制验证（生命周期、能力、错误隔离） | `hello_probe` / `hello_greet` / `hello_fail` |
 | `text_toolbox` | 真实业务：纯本地文本处理 | `text_defaults` / `text_stats` / `text_dedupe` / `text_export` |
-| `video_analyzer` | 业务：视频结构分析 + 画面理解 + 素材资产库 | `video_*`（5 个）/ `library_*`（7 个） |
+| `video_analyzer` | 业务：视频结构分析 + 画面理解 + 素材资产库 | `video_*`（5 个）/ `library_*`（8 个） |
 | `ai_test_plugin` | 验收 AI 能力层：只通过 `ctx.ai` 说话 | `ai_selftest` |
 
 ### video_analyzer
@@ -374,6 +375,10 @@ python run.py tool call library_status
 # 检索：标签（精确/模糊）与语义（自然语言）
 python run.py tool call library_search_labels   --kwargs "{`"query`": `"抽象艺术`", `"match`": `"exact`"}"
 python run.py tool call library_search_semantic --kwargs "{`"query`": `"星空`"}"
+python run.py tool call library_search_semantic --kwargs "{`"query`": `"星空`", `"space`": `"text`"}"   # 对比用
+
+# 审计：每条向量是用什么输入、哪个模型、什么时候算出来的
+python run.py tool call library_audit
 
 # 导出选中镜头（write 风险，需显式授权）
 python run.py --yes tool call library_export --kwargs "{`"shot_id`": 1}"
@@ -383,10 +388,33 @@ python run.py tool call library_retry
 python run.py tool call library_rebuild --kwargs "{`"directory`": `"D:/materials`"}"
 ```
 
-**两种检索必须同时存在**：标签检索精确但只认字面（实测查"星空"命中 0 —— 标签里是"夜空/星云"）；
-语义检索能跨同义词（同一个查询 top-1 命中），但准确率受限 —— **库里的向量是 AI 画面描述文本的
-embedding，不是图片 embedding**，所以检索质量上限等于描述质量上限。
-实测与根因分析见 [《TASK-009 交付报告》](docs/task-009-video-library-v1-report.md)。
+**库里有两种向量，属于不同空间，绝不混算**（`vectors` 的唯一键含 `provider+model`）：
+
+| 空间 | 来源 | 维度 | 实测 top-1 |
+|---|---|---|---|
+| **image** | 中文 CLIP `chinese-clip-rn50`（ONNX，本机推理） | 1024 | **10/10** |
+| text | AI 画面描述文本 + 文本嵌入（Caption 路线） | 768 | 2/10 |
+
+`library_search_semantic` 默认走 **image** 空间；`space="text"` 用于对比。
+**不做融合** —— 实测等权 RRF 会把 top-1 从 10/10 拉到 8/10（弱路拖累强路）。
+
+**三种检索并存**：标签检索精确但只认字面（实测查"星空"命中 0 —— 标签里是"夜空/星云"）；
+语义检索能跨同义词。TASK-009 的语义检索质量受限于"描述文本质量"，
+TASK-010 换成图片本身嵌入后 **top-1 从 2/10 提升到 10/10**。
+
+**启用图片检索**（可选，缺失时自动降级为只看文本空间）：
+
+```powershell
+# 1) 一次性导出 ONNX（Apache-2.0 权重；导出用 torch，运行不用）
+python scripts/export_chinese_clip_onnx.py --out D:\models\chinese-clip-rn50
+# 2) 运行时依赖
+pip install onnxruntime numpy pillow
+# 3) 插件配置在 plugins.json（不在 config.json）
+#    {"plugins": {"video_analyzer": {"config": {"clip_model_dir": "D:/models/chinese-clip-rn50"}}}}
+```
+
+报告：[《TASK-010 交付报告》](docs/task-010-retrieval-quality-report.md) ·
+[《TASK-009 交付报告》](docs/task-009-video-library-v1-report.md)
 
 > **Windows 提示**：PowerShell 会把 `--kwargs` 里的双引号吃掉。请用上面的反引号转义写法，
 > 或 `cmd /c "python run.py ... --kwargs \"{...}\""`。

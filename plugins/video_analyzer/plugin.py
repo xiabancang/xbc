@@ -39,10 +39,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from xbc.core.capabilities.ai import AIError
+from xbc.core.capabilities.ai import (
+    AICapability,
+    AIError,
+    EmbeddingRequest,
+    ImageEmbeddingRequest,
+)
 from xbc.core.contract.plugin import XbcPlugin
 
 # 模块名带 xbc_va_ 前缀，避免与其他插件撞名（插件共享同一个 sys.modules）
+from xbc_va_clip import MODEL_ID as CLIP_MODEL_ID
+from xbc_va_clip import ChineseClipProvider, find_model_dir
 from xbc_va_library import Library, LibraryError, cosine  # noqa: E402
 
 #: 从 ffmpeg showinfo 输出里取时间戳（V18 同款正则）
@@ -143,6 +150,15 @@ class VideoAnalyzerPlugin(XbcPlugin):
 
     def apply(self, ctx: Any, config: dict) -> None:
         self._cfg = dict(config)
+
+        # 把本地中文 CLIP 注册成 Core 的一个 AI Provider。
+        # 注册后**业务代码只通过 `ctx.ai.embed_images()` / `ctx.ai.provider(...)` 用它**，
+        # 推理本身发生在 Provider 里 —— 模型选择与失败语义都留在能力层。
+        # Provider 是懒加载的：构造时不碰磁盘、不加载模型。
+        self._clip = ChineseClipProvider(
+            find_model_dir(self._cfg.get("clip_model_dir"), ctx.data_dir)
+        )
+        ctx.ai.register(self._clip)
 
         path_schema = {"type": "string", "minLength": 1}
 
@@ -366,12 +382,16 @@ class VideoAnalyzerPlugin(XbcPlugin):
         )
         ctx.tools.register(
             "library_search_semantic", self.library_search_semantic,
-            description="语义检索：输入自然语言，返回最相关的镜头（用 embedding 计算相似度）",
+            description=(
+                "语义检索：输入自然语言，返回最相关的镜头。"
+                "默认走图片向量空间（中文 CLIP）；space 可显式指定 image / text 用于对比"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "minLength": 1},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "space": {"type": "string", "enum": ["auto", "image", "text"]},
                 },
                 "required": ["query"],
             },
@@ -399,7 +419,7 @@ class VideoAnalyzerPlugin(XbcPlugin):
                 "未检测到 FFmpeg：video_analyzer 的工具会在调用时明确报错，"
                 "请安装 FFmpeg 或配置 ffmpeg.ffmpeg_path"
             )
-        self.log.info("apply：已注册 13 个视频工具，配置 = %s", self._cfg)
+        self.log.info("apply：已注册 13 个视频工具 + chinese_clip Provider，配置 = %s", self._cfg)
 
     # ---------------- 工具实现 ----------------
     def video_probe(self, path: str) -> dict[str, Any]:
@@ -650,24 +670,47 @@ class VideoAnalyzerPlugin(XbcPlugin):
     def library_status(self) -> dict[str, Any]:
         library = self._library()
         stats = library.stats()
+        stats["spaces"] = self._library_spaces()
         stats["not_ok"] = [
             {"path": row["path"], "status": row["status"], "error": row["error"]}
             for row in library.videos() if row["status"] != "ok"
         ]
         return stats
 
+    def _library_spaces(self) -> list[dict[str, Any]]:
+        """库里的向量空间，并标注**模态**（image / text）。
+
+        模态由 **Core 的能力声明**推导 —— 哪个 Provider 声明了
+        `AICapability.IMAGE_EMBEDDING`，它产出的向量就是图片向量。
+        **插件里不硬编码任何厂商名**，换 Provider 也不用改这里。
+        """
+        try:
+            image_provider = self.ctx.ai.provider(
+                capability=AICapability.IMAGE_EMBEDDING
+            ).name
+        except AIError:
+            image_provider = ""
+        annotated = []
+        for space in self._library().spaces():
+            item = dict(space)
+            item["modality"] = "image" if space["provider"] == image_provider else "text"
+            annotated.append(item)
+        return annotated
+
     def library_audit(self, shot_id: int | None = None) -> dict[str, Any]:
-        """审计：每条向量到底是用什么文本、哪个 provider/model、什么时候算出来的。
+        """审计：每条向量到底是用什么输入、哪个 provider/model、什么时候算出来的。
 
         TASK-010 第一部分的核心入口 —— v1 只存 `labels`，库里看不到真正被嵌入的文本，
         检索行为无法解释。现在一次调用就能回答"这条向量从哪来"。
 
-        `kind='shot_centroid'` 表示该向量是**多帧质心**，`embed_text` 是参与平均的各帧文本，
-        不是直接嵌入的单段文字。
+        - `kind='frame'`：`embed_input` 就是**被嵌入的那一项原文**
+          （文本向量是原文本，图片向量是图片路径）
+        - `kind='shot_centroid'`：该向量是**多帧质心**，`embed_input` 是参与平均的各项，
+          不是直接嵌入的单个输入
         """
         library = self._library()
         records = library.vector_audit(shot_id)
-        missing = [item for item in records if not item["has_embed_text"]]
+        missing = [item for item in records if not item["has_embed_input"]]
         stats = library.stats()
         return {
             "library_path": stats["library_path"],
@@ -675,8 +718,9 @@ class VideoAnalyzerPlugin(XbcPlugin):
             "vectors_total": len(records),
             "vectors_auditable": len(records) - len(missing),
             "auditable": not missing,
-            "missing_embed_text": [item["vector_id"] for item in missing],
-            "note": stats["note"] or "所有向量都记录了被嵌入的原文，可审计。",
+            "missing_embed_input": [item["vector_id"] for item in missing],
+            "spaces": self._library_spaces(),
+            "note": stats["note"] or "所有向量都记录了被嵌入的输入，可审计。",
             "records": records,
         }
 
@@ -844,10 +888,18 @@ class VideoAnalyzerPlugin(XbcPlugin):
         errors: list[dict[str, str]] = []
         analyzed = 0
         provider = model = ""
+        # 图片向量这条路要不要走，**问 Core 的路由**（有没有任何 Provider 支持图片嵌入），
+        # 而不是问插件自己注册的那个 —— 那样会把"谁提供能力"的知识写死在插件里。
+        try:
+            self.ctx.ai.provider(capability=AICapability.IMAGE_EMBEDDING)
+            clip_ready = True
+        except AIError:
+            clip_ready = False
 
         for shot in shots:
             frame_records: list[dict[str, Any]] = []
             frame_vectors: list[dict[str, Any]] = []
+            clip_vectors: list[dict[str, Any]] = []
             labels: list[str] = []
 
             for frame in by_shot.get(shot["index"], []):
@@ -873,6 +925,17 @@ class VideoAnalyzerPlugin(XbcPlugin):
                     embedded = None
                     text_for_embedding = ""
 
+                # 中文 CLIP **图片**向量（与上面的文本向量是**两个不同的向量空间**）。
+                # 走 Core 的图片嵌入能力 —— 业务代码不碰推理运行时
+                clip_embedded = None
+                if clip_ready:
+                    try:
+                        clip_embedded = self.ctx.ai.embed_images([frame["file"]])
+                    except AIError as exc:
+                        errors.append(
+                            {"frame": frame["file"], "error": f"中文 CLIP：{exc}"}
+                        )
+
                 provider, model = annotated.provider, annotated.model
                 analyzed += 1
                 for label in annotated.labels:
@@ -880,35 +943,45 @@ class VideoAnalyzerPlugin(XbcPlugin):
                         labels.append(label)
 
                 frame_records.append({"time": frame["time"], "file": frame["file"]})
+                index = len(frame_records) - 1
                 if embedded is not None and embedded.vectors:
                     frame_vectors.append({
-                        "frame_index": len(frame_records) - 1,
+                        "frame_index": index,
                         "provider": embedded.provider, "model": embedded.model,
                         "dim": embedded.dim, "values": embedded.vectors[0],
-                        "embed_text": text_for_embedding,
+                        "embed_input": text_for_embedding,
+                        "created_at": _timestamp(),
+                    })
+                if clip_embedded is not None and clip_embedded.vectors:
+                    clip_vectors.append({
+                        "frame_index": index,
+                        "provider": clip_embedded.provider, "model": clip_embedded.model,
+                        "dim": clip_embedded.dim, "values": clip_embedded.vectors[0],
+                        # 图片向量的"被嵌入输入"就是图片路径本身
+                        "embed_input": frame["file"],
                         "created_at": _timestamp(),
                     })
 
-            vector = None
-            if frame_vectors:
-                dim = frame_vectors[0]["dim"]
-                values = _mean_vector([item["values"] for item in frame_vectors], dim)
-                if values:
-                    vector = {
-                        "provider": frame_vectors[0]["provider"],
-                        "model": frame_vectors[0]["model"], "dim": dim, "values": values,
-                        # 镜头级是**质心**，不是直接嵌入某段文本。这里记下参与平均的
-                        # 各帧文本，配合 kind='shot_centroid' 说明它不代表"被嵌入的原文"。
-                        "embed_text": " | ".join(
-                            item["embed_text"] for item in frame_vectors
-                        ),
-                        "created_at": _timestamp(),
-                    }
+            def _centroid(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+                if not items:
+                    return None
+                values = _mean_vector([item["values"] for item in items], items[0]["dim"])
+                if not values:
+                    return None
+                return {
+                    "provider": items[0]["provider"], "model": items[0]["model"],
+                    "dim": items[0]["dim"], "values": values,
+                    # 镜头级是**质心**，不是直接嵌入某个输入。记下参与平均的各项，
+                    # 配合 kind='shot_centroid' 说明它不代表"被嵌入的原文"。
+                    "embed_input": " | ".join(item["embed_input"] for item in items),
+                    "created_at": _timestamp(),
+                }
 
             payload.append({
                 "index": shot["index"], "start": shot["start"], "end": shot["end"],
                 "duration": shot["duration"], "frames": frame_records,
-                "labels": labels, "frame_vectors": frame_vectors, "vector": vector,
+                "labels": labels, "frame_vectors": frame_vectors, "vector": _centroid(frame_vectors),
+                "clip_frame_vectors": clip_vectors, "clip_vector": _centroid(clip_vectors),
             })
 
         if analyzed == 0:
@@ -943,22 +1016,60 @@ class VideoAnalyzerPlugin(XbcPlugin):
             "count": len(results), "results": results,
         }
 
-    def library_search_semantic(self, query: str, limit: int = 10) -> dict[str, Any]:
+    def library_search_semantic(
+        self, query: str, limit: int = 10, space: str = "auto"
+    ) -> dict[str, Any]:
         """语义检索：把查询文本向量化，与库里的镜头向量比余弦相似度。
 
-        **跨 Provider / 跨模型的向量不可比较**（TASK-007 的约束）。
-        这里显式剔除不在同一空间的向量并报告数量，而不是算出一个看似合理的分数。
+        ## 为什么必须**先选向量空间**
+
+        TASK-010 之后库里可能同时有两种向量：**中文 CLIP 图片向量**（1024 维）
+        与 **Caption 文本向量**（768 维）。它们来自不同模型、属于不同向量空间，
+        **余弦相似度跨空间没有意义** —— 所以这里先按 `(provider, model)` 选定一个空间，
+        再用**那个空间自己的 Provider**把查询编码成同空间向量。
+
+        `space`（按**模态**，不按厂商）：
+        - `"auto"`（默认）优先图片向量空间 —— 实测 top-1 10/10，
+          优于 Caption 文本空间的 2/10
+        - `"image"` / `"text"` 显式指定，用于对比与复现
+
+        **不做多路融合**：TASK-010 实测等权 RRF 会把 top-1 从 10/10 拉到 8/10
+        （图片路已满分、文本路只 2/10，等权融合纯拖后腿），所以走单路。
         """
         library = self._library()
-        stored = library.shot_vectors()
-        if not stored:
+        available = self._library_spaces()
+        if not available:
             return {
                 "query": query, "mode": "semantic", "count": 0, "results": [],
                 "note": "库里还没有向量：先跑 library_scan 入库",
             }
 
-        embedded = self.ctx.ai.embedding([query])
+        chosen = self._pick_space(available, space)
+        if chosen is None:
+            return {
+                "query": query, "mode": "semantic", "count": 0, "results": [],
+                "spaces": available,
+                "note": f"库里没有 {space!r} 空间的向量；现有空间：{available}",
+            }
+
+        stored = library.shot_vectors(
+            provider=chosen["provider"], model=chosen["model"]
+        )
+        if not stored:
+            return {
+                "query": query, "mode": "semantic", "count": 0, "results": [],
+                "spaces": available,
+                "note": f"空间 {chosen['provider']}/{chosen['model']} 里没有镜头级向量",
+            }
+
+        # **用该空间自己的 Provider 编码查询** —— 中文 CLIP 的查询文本必须由
+        # 中文 CLIP 的文本塔编码，才能和它的图片向量落在同一个向量空间。
+        owner = self.ctx.ai.provider(
+            chosen["provider"], capability=AICapability.EMBEDDING
+        )
+        embedded = owner.embedding(EmbeddingRequest(texts=[query]))
         query_vector = embedded.vectors[0]
+
         usable = [
             item for item in stored
             if item["model"] == embedded.model and item["dim"] == len(query_vector)
@@ -973,11 +1084,13 @@ class VideoAnalyzerPlugin(XbcPlugin):
         labels = library.shot_labels([row["shot_id"] for row in scored])
 
         return {
-            "query": query, "mode": "semantic", "count": len(scored),
+            "query": query, "mode": "semantic", "space": space,
+            "count": len(scored),
             "embedding": {
                 "provider": embedded.provider, "model": embedded.model,
                 "dim": len(query_vector),
             },
+            "spaces_available": available,
             "candidates": len(stored), "skipped_other_space": skipped,
             "results": [
                 {
@@ -991,6 +1104,19 @@ class VideoAnalyzerPlugin(XbcPlugin):
                 for row in scored
             ],
         }
+
+    @staticmethod
+    def _pick_space(spaces: list[dict[str, Any]], want: str) -> dict[str, Any] | None:
+        """按**模态**挑一个向量空间：`image`（图片）/ `text`（Caption 文本）。"""
+        if want == "image":
+            return next((s for s in spaces if s["modality"] == "image"), None)
+        if want == "text":
+            return next((s for s in spaces if s["modality"] == "text"), None)
+        # auto：优先图片向量（实测质量更高），没有就退回任意一个
+        return (
+            next((s for s in spaces if s["modality"] == "image"), None)
+            or spaces[0]
+        )
 
     # ---------------- 素材库：导出 ----------------
     def library_export(self, shot_id: int, output: str | None = None) -> dict[str, Any]:

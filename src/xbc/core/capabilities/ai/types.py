@@ -55,6 +55,11 @@ class AICapability(str, Enum):
     TEXT = "text"
     VISION = "vision"
     EMBEDDING = "embedding"
+    #: 图片向量化。与 `EMBEDDING`（文本向量化）**是两种能力，不是一个**：
+    #: 文本嵌入服务（如 `nomic-embed-text`）和图片嵌入模型（如中文 CLIP）
+    #: 是两个不同的东西，声明成同一个能力会让路由选错 Provider。
+    #: 两者的向量**不可互相比较** —— 见本模块开头那段跨 Provider 约束。
+    IMAGE_EMBEDDING = "image_embedding"
 
     def __str__(self) -> str:  # pragma: no cover - 展示用
         return self.value
@@ -185,12 +190,18 @@ class VisionAnswer:
 
 @dataclass
 class EmbeddingResult:
-    """向量化的结果。
+    """向量化的结果。**文本向量与图片向量共用这一个结构。**
 
-    `vectors[i]` 对应输入的第 i 段文本。`dim` 是向量维度。
+    为什么共用一个结果类型：请求侧确实是两种语义（`EmbeddingRequest.texts` /
+    `ImageEmbeddingRequest.images`，见 `request.py`），所以**请求分成两个类型**；
+    但结果侧的载荷完全同构 —— `vectors[i]` 对应输入第 i 项，`provider` / `model` / `dim`
+    的含义一模一样，跨 Provider 约束也一模一样。**分成两个结构只会制造重复。**
+
+    `vectors[i]` 对应输入的第 i 项（第 i 段文本 / 第 i 张图片）。`dim` 是向量维度。
 
     **跨 Provider / 跨模型不可混用** —— 详见本模块开头那段说明。
     比较两组向量之前，先确认 `provider` 与 `model` 一致。
+    **文本向量与图片向量之间更是绝对不可比较** —— 它们是两个不同的向量空间。
     """
 
     vectors: list[list[float]]

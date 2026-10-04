@@ -6,7 +6,13 @@
 |---|---|
 | `text_generate` | `prompt`，可选 `system` |
 | `vision_analyze` | 本地图片路径 |
-| `embedding` | `texts` |
+| `embedding` | `texts`（文本） |
+| `embed_images` | `images`（本地图片路径） |
+
+**文本向量化与图片向量化是两个请求类型，不是一个。**
+沿用 TASK-007 定下的原则：**一个字段不承载两种语义** ——
+`EmbeddingRequest` 里放 `images` 会让"这段文本"和"这张图"混在一个列表里，
+调用方与实现方都得靠猜。两者的向量也不可互相比较，分开才能让约束说得清。
 
 模型名来自配置（`ai.model` / `ai.embedding_model`），
 温度、上下文长度、超时这类**参数**来自配置的 `ai.options` ——
@@ -50,9 +56,26 @@ class VisionRequest:
 
 @dataclass
 class EmbeddingRequest:
-    """向量化请求。"""
+    """文本向量化请求。"""
 
     texts: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {"texts": list(self.texts)}
+
+
+@dataclass
+class ImageEmbeddingRequest:
+    """图片向量化请求。
+
+    与 `VisionRequest` 一样，**只接受本地图片路径** —— 不接受 base64、
+    不接受 http(s) URL，保持"图片来源只有一种形态"。
+
+    与 `EmbeddingRequest` 的关系：**请求是两种（文本 / 图片），结果是同一个**
+    （`EmbeddingResult`）。两者的向量属于**不同的向量空间，绝对不可互相比较**。
+    """
+
+    images: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"images": [str(image) for image in self.images]}

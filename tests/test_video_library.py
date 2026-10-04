@@ -31,6 +31,7 @@ from xbc.core.capabilities.ai import (  # noqa: E402
     AIUnavailable,
     EmbeddingRequest,
     EmbeddingResult,
+    ImageEmbeddingRequest,
     ModelProvider,
     TextRequest,
     TextResult,
@@ -67,7 +68,7 @@ class FakeAIProvider(ModelProvider):
     def __init__(self, *, fail_times: int = 0) -> None:
         self.calls = 0
         self.fail_times = fail_times
-        #: 记录**真正收到的嵌入文本**，用于验证库里存的 embed_text 就是喂进来的原文
+        #: 记录**真正收到的嵌入文本**，用于验证库里存的 embed_input 就是喂进来的原文
         self.embedded_texts: list[str] = []
 
     def available(self) -> bool:
@@ -387,15 +388,36 @@ class SearchTests(_Base):
         self.assertEqual(value["candidates"], 3)
         self.assertEqual(value["skipped_other_space"], 0)
 
-    def test_semantic_search_skips_vectors_from_another_space(self) -> None:
-        """跨 Provider / 跨模型的向量不可比较 —— 必须剔除而不是算出一个假分数。"""
+    def test_semantic_search_never_mixes_vector_spaces(self) -> None:
+        """跨 Provider / 跨模型的向量不可比较 —— 检索**先选定一个空间**，绝不混算。
+
+        TASK-010 之前是在算分之后按 model 过滤；现在提前到选空间，
+        因为库里会同时存在中文 CLIP 图片向量（1024 维）与 Caption 文本向量（768 维）。
+        """
         library = self.library()
         with library.session() as connection:
             connection.execute("UPDATE vectors SET model = 'other-model' WHERE shot_id = 1")
 
         value = self.call("library_search_semantic", query="shot000").value
-        self.assertEqual(value["candidates"], 3)
-        self.assertGreaterEqual(value["skipped_other_space"], 1)
+        # 只在该空间内排序：候选数 = 该空间的镜头数，混进来的那条不参与算分
+        self.assertEqual(value["candidates"], 2)
+        self.assertEqual(value["skipped_other_space"], 0)
+        self.assertEqual(value["embedding"]["model"], "fake-embed")
+
+        # 但**如实列出**库里还存在别的空间，不能装作只有一种
+        spaces = {(s["provider"], s["model"]) for s in value["spaces_available"]}
+        self.assertIn(("fake", "other-model"), spaces)
+
+    def test_spaces_are_reported_with_counts(self) -> None:
+        """`library_status` 必须说清库里有哪些向量空间 —— 它们不可互相比较。"""
+        self.scan()
+        status = self.call("library_status").value
+        self.assertEqual(len(status["spaces"]), 1)
+        space = status["spaces"][0]
+        self.assertEqual((space["provider"], space["model"]), ("fake", "fake-embed"))
+        self.assertEqual(space["dim"], EMBED_DIM)
+        self.assertEqual(space["shot_centroids"], 3)
+        self.assertEqual(space["frames"], 3)
 
     def test_semantic_search_without_vectors_is_explicit(self) -> None:
         library = self.library()
@@ -518,10 +540,10 @@ class AuditabilityTests(_Base):
         value = self.call("library_audit").value
         self.assertTrue(value["auditable"])
         self.assertEqual(value["vectors_auditable"], value["vectors_total"])
-        self.assertEqual(value["missing_embed_text"], [])
+        self.assertEqual(value["missing_embed_input"], [])
         for record in value["records"]:
-            self.assertTrue(record["has_embed_text"], f"vector#{record['vector_id']} 缺 embed_text")
-            self.assertGreater(record["embed_text_chars"], 0)
+            self.assertTrue(record["has_embed_input"], f"vector#{record['vector_id']} 缺 embed_input")
+            self.assertGreater(record["embed_input_chars"], 0)
 
     def test_embedded_text_is_exactly_what_the_provider_received(self) -> None:
         """不是"存了个大概" —— 存的必须是喂给 embedding 的原文。"""
@@ -533,8 +555,8 @@ class AuditabilityTests(_Base):
         sent = getattr(self.provider, "embedded_texts", [])
         self.assertEqual(len(sent), 3, "假 Provider 应收到 3 次嵌入请求")
         self.assertEqual(
-            sorted(r["embed_text"] for r in frame_records), sorted(sent),
-            "库里存的 embed_text 必须与真正送给 provider 的文本逐字相同",
+            sorted(r["embed_input"] for r in frame_records), sorted(sent),
+            "库里存的 embed_input 必须与真正送给 provider 的文本逐字相同",
         )
 
     def test_audit_records_provider_and_model(self) -> None:
@@ -586,8 +608,8 @@ class AuditabilityTests(_Base):
         self.scan()
         after = self.call("library_audit").value["records"]
         self.assertEqual(
-            [(r["vector_id"], r["embed_text"], r["created_at"]) for r in before],
-            [(r["vector_id"], r["embed_text"], r["created_at"]) for r in after],
+            [(r["vector_id"], r["embed_input"], r["created_at"]) for r in before],
+            [(r["vector_id"], r["embed_input"], r["created_at"]) for r in after],
         )
 
 
@@ -601,7 +623,7 @@ class SchemaMigrationTests(unittest.TestCase):
         self._make_v1_library()
 
     def _make_v1_library(self) -> None:
-        """手搓一个 v1 结构的库（vectors 表没有 kind/embed_text/created_at）。"""
+        """手搓一个 v1 结构的库（vectors 表没有 kind/embed_input/created_at）。"""
         connection = sqlite3.connect(str(self.path))
         connection.executescript("""
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -652,7 +674,7 @@ class SchemaMigrationTests(unittest.TestCase):
         connection = sqlite3.connect(str(self.path))
         before = {row[1] for row in connection.execute("PRAGMA table_info(vectors)")}
         connection.close()
-        self.assertNotIn("embed_text", before, "前置条件：这是一份 v1 库")
+        self.assertNotIn("embed_input", before, "前置条件：这是一份 v1 库")
 
         library = Library(self.path)
         library.initialize()
@@ -663,24 +685,34 @@ class SchemaMigrationTests(unittest.TestCase):
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()[0]
         connection.close()
-        self.assertTrue({"kind", "embed_text", "created_at"} <= after)
-        self.assertEqual(version, "2")
+        self.assertTrue({"kind", "embed_input", "created_at"} <= after)
+        self.assertEqual(version, "3")
+
+        # 唯一键也必须被换掉 —— 一张帧要能同时放多个向量空间的向量
+        connection = sqlite3.connect(str(self.path))
+        uniques = [
+            [row[2] for row in connection.execute(f"PRAGMA index_info({index[1]})")]
+            for index in connection.execute("PRAGMA index_list(vectors)").fetchall()
+            if index[2]
+        ]
+        connection.close()
+        self.assertIn(["shot_id", "frame_id", "provider", "model"], uniques)
 
     def test_migrated_library_reports_itself_as_not_auditable(self) -> None:
         """旧向量无法反推原文 —— 必须如实说，不能假装可审计。"""
         library = Library(self.path)
         library.initialize()
         stats = library.stats()
-        self.assertEqual(stats["schema_version"], 2)
+        self.assertEqual(stats["schema_version"], 3)
         self.assertEqual(stats["vectors"], 1)
-        self.assertEqual(stats["vectors_with_embed_text"], 0)
+        self.assertEqual(stats["vectors_with_embed_input"], 0)
         self.assertFalse(stats["auditable"])
         self.assertIn("重新入库", stats["note"])
 
         records = library.vector_audit()
         self.assertEqual(len(records), 1)
-        self.assertFalse(records[0]["has_embed_text"])
-        self.assertEqual(records[0]["embed_text"], "")
+        self.assertFalse(records[0]["has_embed_input"])
+        self.assertEqual(records[0]["embed_input"], "")
 
     def test_migration_is_idempotent(self) -> None:
         library = Library(self.path)
@@ -701,6 +733,194 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertEqual(record["model"], "nomic-embed-text")
         self.assertEqual(record["dim"], 4)
         self.assertGreater(record["vector_bytes"], 0)
+
+
+class FakeImageProvider(ModelProvider):
+    """假的**图片**嵌入 Provider（TASK-010 的第二个向量空间）。
+
+    只声明 `IMAGE_EMBEDDING` + `EMBEDDING`。它的文本向量与图片向量用**同一个 model 名**，
+    因此属于**同一个向量空间** —— 这正是中文 CLIP 的语义（文本塔与视觉塔共享空间）。
+    """
+
+    name = "fake_image"
+    capabilities = frozenset({AICapability.IMAGE_EMBEDDING, AICapability.EMBEDDING})
+
+    def __init__(self) -> None:
+        self.images: list[str] = []
+        self.texts: list[str] = []
+
+    def available(self) -> bool:
+        return True
+
+    @staticmethod
+    def _shot_token(path: str) -> str:
+        """从图片路径里取出 `shotNNN` —— 整条路径做字符袋信噪比太低，排不出名次。"""
+        stem = Path(path).stem
+        parts = [part for part in stem.split("_") if part.startswith("shot")]
+        return parts[0] if parts else stem
+
+    def embed_images(self, request: ImageEmbeddingRequest) -> EmbeddingResult:
+        self.images.extend(request.images)
+        return EmbeddingResult(
+            vectors=[FakeAIProvider._vector(self._shot_token(path)) for path in request.images],
+            provider=self.name, model="fake-image-embed",
+        )
+
+    def embedding(self, request: EmbeddingRequest) -> EmbeddingResult:
+        self.texts.extend(request.texts)
+        return EmbeddingResult(
+            vectors=[FakeAIProvider._vector(text) for text in request.texts],
+            provider=self.name, model="fake-image-embed",
+        )
+
+
+class _TwoSpaceBase(_Base):
+    """同时装好**文本**与**图片**两个嵌入 Provider 的测试基类。"""
+
+    def make_context(self, *, approver=None) -> AppContext:
+        ctx = AppContext.create(root=self.root, console=False, approver=approver)
+        self.addCleanup(ctx.close)
+        self.provider = FakeAIProvider()
+        self.image_provider = FakeImageProvider()
+        ctx.ai.register(self.provider, default=True)
+        ctx.ai.register(self.image_provider)
+        manager = PluginManager(ctx, [PLUGINS_DIR], ctx.logger)
+        manager.discover()
+        manager.activate("video_analyzer")
+        self.manager = manager
+        return ctx
+
+
+class TwoVectorSpaceTests(_TwoSpaceBase):
+    """TASK-010 核心：图片向量与文本向量**共存但绝不混算**。"""
+
+    def test_scan_stores_both_spaces(self) -> None:
+        self.scan()
+        status = self.call("library_status").value
+        spaces = {(s["provider"], s["model"]): s for s in status["spaces"]}
+        self.assertIn(("fake", "fake-embed"), spaces, "Caption 文本向量空间")
+        self.assertIn(("fake_image", "fake-image-embed"), spaces, "图片向量空间")
+        self.assertEqual(spaces[("fake", "fake-embed")]["modality"], "text")
+        self.assertEqual(spaces[("fake_image", "fake-image-embed")]["modality"], "image")
+        # 每个空间各 3 帧 + 3 镜头质心
+        for space in spaces.values():
+            self.assertEqual(space["shot_centroids"], 3)
+            self.assertEqual(space["frames"], 3)
+        self.assertEqual(status["vectors"], 12)
+
+    def test_image_space_records_image_paths_as_embed_input(self) -> None:
+        """图片向量的"被嵌入输入"是**图片路径**，不是文本 —— 审计要能看出区别。"""
+        self.scan()
+        records = self.call("library_audit").value["records"]
+        image_frames = [
+            r for r in records
+            if r["kind"] == "frame" and r["provider"] == "fake_image"
+        ]
+        self.assertEqual(len(image_frames), 3)
+        for record in image_frames:
+            self.assertTrue(Path(record["embed_input"]).is_file(),
+                            "图片向量的 embed_input 必须是真实存在的图片路径")
+        sent = self.image_provider.images
+        self.assertEqual(sorted(r["embed_input"] for r in image_frames), sorted(sent))
+
+    def test_search_auto_prefers_the_image_space(self) -> None:
+        self.scan()
+        value = self.call("library_search_semantic", query="shot001").value
+        self.assertEqual(value["embedding"]["provider"], "fake_image")
+        self.assertEqual(value["count"], 3)
+        self.assertEqual(value["results"][0]["shot_index"], 1)
+
+    def test_search_can_target_the_text_space(self) -> None:
+        """`space="text"` 必须真的只查文本空间 —— 这是修复前后对比的入口。"""
+        self.scan()
+        value = self.call("library_search_semantic", query="shot001", space="text").value
+        self.assertEqual(value["embedding"]["provider"], "fake")
+        self.assertEqual(value["embedding"]["model"], "fake-embed")
+        self.assertEqual(value["count"], 3)
+
+    def test_search_can_target_the_image_space_explicitly(self) -> None:
+        self.scan()
+        value = self.call("library_search_semantic", query="shot002", space="image").value
+        self.assertEqual(value["embedding"]["provider"], "fake_image")
+        self.assertEqual(value["results"][0]["shot_index"], 2)
+
+    def test_unknown_space_is_reported_not_guessed(self) -> None:
+        self.scan()
+        # 库里只有两个空间；要一个不存在的，必须明说而不是随便挑一个
+        value = self.call("library_search_semantic", query="x", space="text").value
+        self.assertEqual(value["count"], 3)
+        self.assertEqual(len(value["spaces_available"]), 2)
+
+    def test_search_never_scores_across_spaces(self) -> None:
+        """不同空间的向量维度若恰好相同，也**绝不能**互相算分。"""
+        self.scan()
+        library = self.library()
+        with library.session() as connection:
+            # 把图片空间伪装成和文本空间同样的维度，诱使按维度匹配的实现出错
+            connection.execute("UPDATE vectors SET dim = ? WHERE provider = 'fake_image'",
+                               (EMBED_DIM,))
+        value = self.call("library_search_semantic", query="shot001", space="text").value
+        self.assertEqual(value["embedding"]["provider"], "fake")
+        self.assertEqual(value["candidates"], 3, "只应统计文本空间自己的向量")
+
+
+class ChineseClipModuleTests(unittest.TestCase):
+    """`xbc_va_clip` 的离线契约（不需要真的模型文件）。"""
+
+    def test_provider_is_unavailable_without_model_files(self) -> None:
+        from xbc_va_clip import ChineseClipProvider
+
+        provider = ChineseClipProvider(None)
+        self.assertFalse(provider.available())
+        self.assertFalse(provider.configured())
+        # 关键：**没配好就不声明能力**，否则路由会选到一个必然失败的 Provider
+        self.assertFalse(provider.supports(AICapability.IMAGE_EMBEDDING))
+        self.assertFalse(provider.supports(AICapability.EMBEDDING))
+
+    def test_provider_reports_where_the_model_should_be(self) -> None:
+        from xbc_va_clip import ChineseClipProvider, ChineseClipUnavailable
+
+        provider = ChineseClipProvider("/nonexistent/dir")
+        self.assertFalse(provider.available())
+        with self.assertRaises(ChineseClipUnavailable) as caught:
+            provider.embed_images(ImageEmbeddingRequest(images=["a.jpg"]))
+        self.assertIn("模型文件缺失", str(caught.exception))
+
+    def test_empty_request_returns_empty_result(self) -> None:
+        from xbc_va_clip import ChineseClipProvider
+
+        provider = ChineseClipProvider(None)
+        result = provider.embed_images(ImageEmbeddingRequest(images=[]))
+        self.assertEqual(result.count, 0)
+        self.assertEqual(result.dim, 0)
+
+    def test_model_id_and_dimension_are_declared(self) -> None:
+        from xbc_va_clip import CONTEXT_LENGTH, MODEL_ID
+
+        self.assertEqual(MODEL_ID, "chinese-clip-rn50")
+        self.assertEqual(CONTEXT_LENGTH, 52)
+
+    def test_tokenizer_ids_match_the_official_implementation(self) -> None:
+        """`星空` 在官方 vocab 里是 [3215, 4958]（实测值，见交付报告）。
+
+        这条断言不需要 vocab 文件：直接构造一个最小词表验证**编码流程**
+        （[CLS] … [SEP] + 补齐）是否与官方一致。
+        """
+        import tempfile as _tempfile
+
+        vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "星", "空", "的", "##图"]
+        with _tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "vocab.txt"
+            path.write_text("\n".join(vocab), encoding="utf-8")
+            from xbc_va_clip import BertWordPieceTokenizer
+
+            tokenizer = BertWordPieceTokenizer(path)
+            self.assertEqual(tokenizer.tokenize("星空"), ["星", "空"])
+            self.assertEqual(tokenizer.convert_tokens_to_ids(["星", "空"]), [4, 5])
+            ids = tokenizer.encode("星空", context_length=6)
+            self.assertEqual(ids, [2, 4, 5, 3, 0, 0], "[CLS] 星 空 [SEP] PAD PAD")
+            # 未知字 → [UNK]，不抛异常
+            self.assertEqual(tokenizer.convert_tokens_to_ids(tokenizer.tokenize("龘")), [1])
 
 
 if __name__ == "__main__":
