@@ -686,7 +686,7 @@ class SchemaMigrationTests(unittest.TestCase):
         ).fetchone()[0]
         connection.close()
         self.assertTrue({"kind", "embed_input", "created_at"} <= after)
-        self.assertEqual(version, "3")
+        self.assertEqual(version, "4")
 
         # 唯一键也必须被换掉 —— 一张帧要能同时放多个向量空间的向量
         connection = sqlite3.connect(str(self.path))
@@ -703,7 +703,7 @@ class SchemaMigrationTests(unittest.TestCase):
         library = Library(self.path)
         library.initialize()
         stats = library.stats()
-        self.assertEqual(stats["schema_version"], 3)
+        self.assertEqual(stats["schema_version"], 4)
         self.assertEqual(stats["vectors"], 1)
         self.assertEqual(stats["vectors_with_embed_input"], 0)
         self.assertFalse(stats["auditable"])
@@ -713,6 +713,47 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertFalse(records[0]["has_embed_input"])
         self.assertEqual(records[0]["embed_input"], "")
+
+    def test_v1_library_gets_shot_key_backfilled(self) -> None:
+        """v3 → v4：老库的镜头要补上**持久标识** `shot_key`（TASK-012a）。
+
+        这份 v1 夹具没有 `shot_key` 列，迁移必须加列 + 用
+        `(file_hash, start, end)` 回填，否则老库的匹配结果永远解析不了。
+        """
+        from xbc_va_library import shot_key
+
+        connection = sqlite3.connect(str(self.path))
+        before = {row[1] for row in connection.execute("PRAGMA table_info(shots)")}
+        connection.close()
+        self.assertNotIn("shot_key", before, "前置条件：这是一份没有 shot_key 的旧库")
+
+        library = Library(self.path)
+        library.initialize()
+
+        connection = sqlite3.connect(str(self.path))
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(shots)")}
+        row = connection.execute(
+            "SELECT shot_key, start_seconds, end_seconds FROM shots WHERE id = 1"
+        ).fetchone()
+        connection.close()
+
+        self.assertIn("shot_key", columns)
+        expected = shot_key("deadbeef", row[1], row[2])
+        self.assertEqual(row[0], expected, "回填的 key 必须与 (file_hash, 起, 止) 一致")
+        self.assertEqual(len(row[0]), 16)
+
+    def test_shot_key_is_not_a_unique_index(self) -> None:
+        """同一份内容存在两个路径时 key 会撞 —— 那是允许的，解析时按路径消歧。"""
+        library = Library(self.path)
+        library.initialize()
+        connection = sqlite3.connect(str(self.path))
+        unique = {
+            index[1]: bool(index[2])
+            for index in connection.execute("PRAGMA index_list(shots)")
+        }
+        connection.close()
+        self.assertIn("idx_shots_key", unique)
+        self.assertFalse(unique["idx_shots_key"], "shot_key 索引不能是唯一索引")
 
     def test_migration_is_idempotent(self) -> None:
         library = Library(self.path)

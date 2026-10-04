@@ -57,9 +57,12 @@ from xbc_va_match import (
     DEFAULT_MIN_CHARS as MATCH_DEFAULT_MIN_CHARS,
 )
 from xbc_va_match import (
+    RESULT_VERSION,
     MatchError,
     MatchStore,
+    refresh_snapshots,
     reorder_candidate,
+    segment_at,
     segment_script,
     select_shot,
 )
@@ -1241,6 +1244,9 @@ class VideoAnalyzerPlugin(XbcPlugin):
             "results": [
                 {
                     "score": row["score"],
+                    # **持久身份**：存下来的引用必须用它，不能用 shot_id
+                    # （shot_id 重新分析后就会变，见 xbc_va_library.shot_key）
+                    "shot_key": row["shot_key"],
                     "video_path": row["video_path"],
                     "shot_id": row["shot_id"], "shot_index": row["shot_index"],
                     "start": round(row["start"], 3), "end": round(row["end"], 3),
@@ -1320,13 +1326,16 @@ class VideoAnalyzerPlugin(XbcPlugin):
             matched.append({
                 "index": index,
                 "text": text,
+                # **身份是 shot_key**：重新分析素材库后 shot_id 会变，shot_key 不会。
+                # shot_id 只作为"写入时的快照"，读取时会被重新解析（见 match_show）。
+                "selected_shot_key": candidates[0]["shot_key"] if candidates else None,
                 "selected_shot_id": candidates[0]["shot_id"] if candidates else None,
                 "candidates": candidates,
             })
 
         chosen = context["chosen"]
         payload: dict[str, Any] = {
-            "version": 1,
+            "version": RESULT_VERSION,
             "name": name,
             "script": script,
             "top_n": count,
@@ -1352,34 +1361,91 @@ class VideoAnalyzerPlugin(XbcPlugin):
             "hint": (
                 "每段默认选中 top-1；用 match_select 换成别的镜头、"
                 "match_reorder 调候选顺序，改动会存进同一份 JSON。"
+                "身份是 shot_key（重新分析素材库后依然指向同一个镜头）。"
             ),
         }
+
+    def _match_resolver(self) -> Any:
+        """给 `refresh_snapshots` 用的解析器：`shot_key` → 当前库里的镜头。"""
+        library = self._library()
+        keyed = library.shots_by_key  # 绑定一次，逐条解析时不再查属性
+
+        def resolve(key: str, prefer_path: str) -> dict[str, Any] | None:
+            matches = keyed(key, prefer_path=prefer_path)
+            return matches[0] if matches else None
+
+        return resolve
+
+    def _resolve_current(
+        self, payload: dict[str, Any], segment_index: int, shot_id: int
+    ) -> tuple[str, dict[str, Any] | None]:
+        """把一个**当前**的 `shot_id` 换成 `shot_key`。
+
+        工具签名保持用 `shot_id`（调用方从检索/状态里现取，一定是当前的），
+        但落到盘上的身份是 key。候选里的 id 是写盘时的快照，得先刷新再比。
+        """
+        refresh_snapshots(payload, self._match_resolver())
+        segment = segment_at(payload, int(segment_index))
+
+        key = ""
+        for candidate in segment.get("candidates", []):
+            if candidate.get("shot_id") is None:
+                continue
+            if int(candidate["shot_id"]) == int(shot_id):
+                key = str(candidate.get("shot_key", ""))
+                break
+
+        shot = self._library().shot(int(shot_id))
+        if shot is None:
+            raise ValueError(f"素材库里没有这个镜头：shot_id={shot_id}")
+        shot["video_path"] = str(shot.get("video_path", ""))
+        if not key:
+            key = str(shot.get("shot_key", ""))
+        if not key:
+            raise ValueError(
+                f"镜头 {shot_id} 没有持久标识 —— 这个库是 v3 之前的旧库，"
+                "需要重新入库一次（library_scan）"
+            )
+        return key, shot
 
     def match_show(self, name: str | None = None) -> dict[str, Any]:
         """查看匹配结果。不传 `name` 就列出已有的。
 
-        **选中的镜头与候选顺序都如实回显** —— 人能看到自己上次改了什么。
+        **`shot_id` 是现算的**：文件里存的是 `shot_key`，这里用当前库把它解析成
+        `shot_id` 再给你 —— 所以哪怕中间重新分析过素材库，看到的 id 也是**对的**。
+
+        解析不到的候选标 `stale: true` 并说明原因，**不会静默指向一个错的镜头**。
         """
         store = self._match_store()
         if not name:
-            return {"count": len(items := store.listing()), "matches": items}
+            items = store.listing()
+            return {"count": len(items), "matches": items}
 
         payload = store.load(name)
+        refresh_snapshots(payload, self._match_resolver())
         segments = payload.get("segments", [])
+        stale = sum(
+            1 for segment in segments for candidate in segment.get("candidates", [])
+            if candidate.get("stale")
+        )
         return {
             "name": payload.get("name", name),
             "path": str(store.path(name)),
+            "version": payload.get("version", 1),
             "script": payload.get("script", ""),
             "top_n": payload.get("top_n"),
             "space": payload.get("space", {}),
             "library_shots": payload.get("library_shots"),
             "created_at": payload.get("created_at", ""),
             "updated_at": payload.get("updated_at", ""),
+            "stale_candidates": stale,
             "segments": [
                 {
                     "index": segment.get("index"),
                     "text": segment.get("text", ""),
+                    "selected_shot_key": segment.get("selected_shot_key"),
                     "selected_shot_id": segment.get("selected_shot_id"),
+                    "selected_stale": bool(segment.get("selected_stale")),
                     "candidates": segment.get("candidates", []),
                 }
                 for segment in segments
@@ -1391,53 +1457,49 @@ class VideoAnalyzerPlugin(XbcPlugin):
     ) -> dict[str, Any]:
         """指定某一段用哪个镜头（"替换候选 / 手动指定"都走这一步）。
 
+        `shot_id` 用**当前的**库 id（从检索结果或 `library_status` 里现取）。
+        存盘时记的是 `shot_key`，所以重新分析后这条选择依然指向同一个镜头。
+
         - 镜头已在该段候选里 → 直接选中它
         - 不在候选里 → 从素材库取它的信息，插到候选**首位**并选中
         """
         store = self._match_store()
         payload = store.load(name)
-        shot: dict[str, Any] | None = None
-        if not any(
-            int(c.get("shot_id", -1)) == int(shot_id)
-            for segment in payload.get("segments", [])
-            for c in segment.get("candidates", [])
-        ):
-            shot = self._library().shot(int(shot_id))
-            if shot is None:
-                raise ValueError(f"素材库里没有这个镜头：shot_id={shot_id}")
+        key, shot = self._resolve_current(payload, int(segment_index), int(shot_id))
         segment = select_shot(
-            payload, segment_index=int(segment_index), shot_id=int(shot_id), shot=shot
+            payload, segment_index=int(segment_index), shot_key=key, shot=shot
         )
         path = store.save(payload)
         return {
             "name": payload.get("name", name), "path": str(path),
-            "segment": {
-                "index": segment.get("index"),
-                "text": segment.get("text", ""),
-                "selected_shot_id": segment.get("selected_shot_id"),
-                "candidates": segment.get("candidates", []),
-            },
+            "segment": self._segment_view(segment),
         }
 
     def match_reorder(
         self, name: str, segment_index: int, shot_id: int, direction: str = "up"
     ) -> dict[str, Any]:
-        """把某段里的一个候选上移 / 下移一位（调整顺序）。"""
+        """把某段里的一个候选上移 / 下移一位（调整顺序）。按 `shot_key` 存盘。"""
         store = self._match_store()
         payload = store.load(name)
+        key, _shot = self._resolve_current(payload, int(segment_index), int(shot_id))
         segment = reorder_candidate(
             payload, segment_index=int(segment_index),
-            shot_id=int(shot_id), direction=str(direction),
+            shot_key=key, direction=str(direction),
         )
         path = store.save(payload)
         return {
             "name": payload.get("name", name), "path": str(path),
-            "segment": {
-                "index": segment.get("index"),
-                "text": segment.get("text", ""),
-                "selected_shot_id": segment.get("selected_shot_id"),
-                "candidates": segment.get("candidates", []),
-            },
+            "segment": self._segment_view(segment),
+        }
+
+    @staticmethod
+    def _segment_view(segment: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "index": segment.get("index"),
+            "text": segment.get("text", ""),
+            "selected_shot_key": segment.get("selected_shot_key"),
+            "selected_shot_id": segment.get("selected_shot_id"),
+            "candidates": segment.get("candidates", []),
         }
 
     # ---------------- 素材库：导出 ----------------

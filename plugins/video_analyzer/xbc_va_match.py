@@ -31,7 +31,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 #: 一级切分：句末标点。切完标点跟随前句。
 _SENTENCE_END = "。！？!?；;…"
@@ -224,6 +224,14 @@ class MatchStore:
         return items
 
 
+#: 匹配结果的格式版本。
+#:
+#: - `1`：候选只存 `shot_id` —— **重新分析素材库后会指向错镜头**（TASK-012a 修的就是它）
+#: - `2`：候选存 `shot_key`（内容哈希 + 时间码，见 `xbc_va_library.shot_key`）；
+#:   `shot_id` 降级为"写入时的快照"，只用于显示与对比，**不再当身份用**
+RESULT_VERSION = 2
+
+
 # ---------------------------------------------------------------- 结果编辑
 def _segments(payload: dict[str, Any]) -> list[dict[str, Any]]:
     segments = payload.get("segments")
@@ -239,18 +247,24 @@ def _segment_at(payload: dict[str, Any], index: int) -> dict[str, Any]:
     return segments[index]
 
 
-def find_candidate(segment: dict[str, Any], shot_id: int) -> int:
+def segment_at(payload: dict[str, Any], index: int) -> dict[str, Any]:
+    """取某一提段（越界报错）。"""
+    return _segment_at(payload, index)
+
+
+def find_candidate(segment: dict[str, Any], shot_key: str) -> int:
+    """按**持久标识**找候选下标。`shot_key` 是身份，不是快照 id。"""
     for position, candidate in enumerate(segment.get("candidates", [])):
-        if int(candidate.get("shot_id", -1)) == int(shot_id):
+        if str(candidate.get("shot_key", "")) == str(shot_key):
             return position
     return -1
 
 
 def select_shot(
-    payload: dict[str, Any], *, segment_index: int, shot_id: int,
+    payload: dict[str, Any], *, segment_index: int, shot_key: str,
     shot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """把某段**选中的镜头**设为 `shot_id`（"替换/手动指定"都走这里）。
+    """把某段**选中的镜头**设为 `shot_key`（"替换/手动指定"都走这里）。
 
     - 该镜头已在候选里 → 直接选中
     - 不在候选里 → **插到候选首位**，标 `manual: true`、`score: null`
@@ -258,19 +272,22 @@ def select_shot(
     为什么手动指定的候选**不给分数**：分数是"检索排名"的产物，
     人指定它不是检索的结果。硬塞一个 cosine 进去会让"分数"这个词
     在同一个列表里有两个含义。
+
+    **身份是 `shot_key`，不是 `shot_id`** —— 重新分析后 id 会变，key 不会。
     """
     segment = _segment_at(payload, segment_index)
     candidates = segment.setdefault("candidates", [])
-    position = find_candidate(segment, shot_id)
+    position = find_candidate(segment, shot_key)
 
     if position < 0:
         if shot is None:
             raise MatchError(
-                f"镜头 {shot_id} 不在第 {segment_index} 段的候选里，"
+                f"镜头 {shot_key} 不在第 {segment_index} 段的候选里，"
                 "且没有提供它的镜头信息（无法插入）"
             )
         candidates.insert(0, {
-            "shot_id": int(shot_id),
+            "shot_key": str(shot_key),
+            "shot_id": int(shot.get("id", 0)),
             "video_path": str(shot.get("video_path", "")),
             "shot_index": int(shot.get("shot_index", 0)),
             "start": round(float(shot.get("start_seconds", 0.0)), 3),
@@ -280,39 +297,99 @@ def select_shot(
             "manual": True,
             "labels": list(shot.get("labels", [])),
         })
-    segment["selected_shot_id"] = int(shot_id)
+    else:
+        # 从库里刷一遍快照 id —— 人可能隔了很久才来指定
+        if shot is not None:
+            candidates[position]["shot_id"] = int(shot.get("id", 0))
+    segment["selected_shot_key"] = str(shot_key)
+    if shot is not None:
+        segment["selected_shot_id"] = int(shot.get("id", 0))
     return segment
 
 
 def reorder_candidate(
-    payload: dict[str, Any], *, segment_index: int, shot_id: int, direction: str
+    payload: dict[str, Any], *, segment_index: int, shot_key: str, direction: str
 ) -> dict[str, Any]:
-    """把某段里的一个候选上移或下移一位。"""
+    """把某段里的一个候选上移或下移一位。按 `shot_key` 定位。"""
     if direction not in ("up", "down"):
         raise MatchError(f"direction 只能是 up / down，得到 {direction!r}")
     segment = _segment_at(payload, segment_index)
     candidates = segment.setdefault("candidates", [])
-    position = find_candidate(segment, shot_id)
+    position = find_candidate(segment, shot_key)
     if position < 0:
-        raise MatchError(f"镜头 {shot_id} 不在第 {segment_index} 段的候选里")
+        raise MatchError(f"镜头 {shot_key} 不在第 {segment_index} 段的候选里")
     target = position - 1 if direction == "up" else position + 1
     if not 0 <= target < len(candidates):
         raise MatchError(
-            f"镜头 {shot_id} 已经在{'最前' if direction == 'up' else '最后'}，无法再"
+            f"镜头 {shot_key} 已经在{'最前' if direction == 'up' else '最后'}，无法再"
             f"{'上' if direction == 'up' else '下'}移"
         )
     candidates[position], candidates[target] = candidates[target], candidates[position]
     return segment
 
 
+def refresh_snapshots(
+    payload: dict[str, Any], resolve: Callable[[str, str], dict[str, Any] | None]
+) -> dict[str, Any]:
+    """把所有候选的 **`shot_id` 快照刷新成当前库里的值**，并标出失效项。
+
+    `resolve(shot_key, video_path)` 返回当前库里的镜头（查不到返回 `None`）。
+
+    这是 TASK-012a 的**读取侧落点**：文件里存的是 `shot_key`，
+    对外给出的 `shot_id` 一律**现算** —— 所以重新分析后依然指向正确的镜头。
+
+    解析不到时标 `stale: true` 并给出原因，**绝不静默指向一个错的镜头**。
+    """
+    for segment in _segments(payload):
+        for candidate in segment.get("candidates", []):
+            key = str(candidate.get("shot_key", ""))
+            if not key:
+                candidate["stale"] = True
+                candidate["stale_reason"] = (
+                    "这条候选是 v1 旧格式，没有 shot_key，无法在库变化后重新定位"
+                )
+                continue
+            shot = resolve(key, str(candidate.get("video_path", "")))
+            if shot is None:
+                candidate["stale"] = True
+                candidate["stale_reason"] = (
+                    "素材库里已找不到这个镜头（视频内容被替换或该镜头已不存在）"
+                )
+                candidate["shot_id"] = None
+                continue
+            candidate["stale"] = False
+            candidate.pop("stale_reason", None)
+            candidate["shot_id"] = int(shot["shot_id"])
+            candidate["video_path"] = str(shot["video_path"])
+            candidate["shot_index"] = int(shot["shot_index"])
+            candidate["start"] = round(float(shot["start_seconds"]), 3)
+            candidate["end"] = round(float(shot["end_seconds"]), 3)
+            candidate["duration"] = round(float(shot["duration_seconds"]), 3)
+
+        selected = segment.get("selected_shot_key")
+        if not selected:
+            continue
+        chosen = next(
+            (c for c in segment.get("candidates", [])
+             if str(c.get("shot_key", "")) == str(selected) and not c.get("stale")),
+            None,
+        )
+        segment["selected_shot_id"] = int(chosen["shot_id"]) if chosen else None
+        segment["selected_stale"] = chosen is None
+    return payload
+
+
 __all__ = [
     "DEFAULT_MAX_CHARS",
     "DEFAULT_MIN_CHARS",
     "MATCH_DIR_NAME",
+    "RESULT_VERSION",
     "MatchError",
     "MatchStore",
     "find_candidate",
+    "refresh_snapshots",
     "reorder_candidate",
+    "segment_at",
     "segment_script",
     "select_shot",
 ]

@@ -45,6 +45,7 @@ v1 只存了 `labels`，但向量其实是由 `answer + labels` 算出来的 —
 from __future__ import annotations
 
 import array
+import hashlib
 import math
 import sqlite3
 from contextlib import contextmanager
@@ -52,7 +53,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -83,11 +84,18 @@ CREATE TABLE IF NOT EXISTS shots (
     start_seconds    REAL    NOT NULL,
     end_seconds      REAL    NOT NULL,
     duration_seconds REAL    NOT NULL,
+    -- **镜头的持久标识**：内容哈希 + 时间码。见 shot_key()。
+    -- id 是自增的、重新分析就会变；shot_key 不会 —— 凡是"存下来给别人看"的
+    -- 镜头引用都必须用它，不能存 id。
+    shot_key         TEXT    NOT NULL DEFAULT '',
     ai_provider      TEXT    NOT NULL DEFAULT '',
     ai_model         TEXT    NOT NULL DEFAULT '',
     UNIQUE(video_id, shot_index)
 );
 CREATE INDEX IF NOT EXISTS idx_shots_video ON shots(video_id);
+-- 注意：shot_key 的**唯一索引不在这里建**。
+-- 老库此刻还没有这一列（CREATE TABLE IF NOT EXISTS 是空操作），
+-- 直接建索引会报 "no such column"。索引统一放在 _migrate() 里，加完列再建。
 
 CREATE TABLE IF NOT EXISTS frames (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +189,35 @@ def cosine(left: list[float], right: list[float]) -> float:
     return dot / (norm_left * norm_right)
 
 
+def shot_key(file_hash: str, start: float, end: float) -> str:
+    """镜头的**持久标识**：内容哈希 + 时间码。
+
+    ## 为什么不能用 `shots.id`
+
+    `shots.id` 是 `AUTOINCREMENT`（SQLite 永不复用），而重新分析走
+    `DELETE FROM shots` + `INSERT` —— 同一个镜头每次都会拿到一个**全新的 id**。
+    实测：首次入库 `1,2,3` → force 重分析 `4,5,6` → 再 force `7,8,9`。
+    `library_rebuild` 更彻底，连 `videos.id` 都重置。
+
+    所以**凡是"存下来给别人看"的镜头引用都不能用 id**。
+
+    ## 这个 key 为什么稳
+
+    由 `(file_hash, start, end)` 生成，**不含任何自增 id**：
+
+    - 重新分析同一个视频 → 内容哈希与时间码都不变 → **key 不变**（实测 3/3）
+    - 素材改名 / 移动 → key 里不含路径 → **key 不变**
+    - 视频内容被替换（重新编码）→ file_hash 变 → key 变 →
+      旧引用**明确过期**（这是对的：内容变了，镜头就不是同一个了）
+
+    时间码统一取到毫秒，避免浮点尾差造成"看起来一样却对不上"。
+    """
+    rounded_start = round(float(start), 3)
+    rounded_end = round(float(end), 3)
+    raw = f"{file_hash}:{rounded_start:.3f}:{rounded_end:.3f}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
 class Library:
     """素材库。一个实例对应一个库文件。"""
 
@@ -253,7 +290,17 @@ class Library:
 
         `CREATE TABLE IF NOT EXISTS` **既不会加列、也不会改约束**，所以老库必须走这里。
 
-        v1 / v2 的 `vectors` 有两个问题：
+        **每张表各管各的**：`shots` 与 `vectors` 的迁移互不依赖，
+        不能因为 `vectors` 已经是最新的就跳过 `shots`。
+        """
+        actions: list[str] = []
+        actions.extend(Library._migrate_vectors(connection))
+        actions.extend(Library._migrate_shot_key(connection))
+        return actions
+
+    @staticmethod
+    def _migrate_vectors(connection: sqlite3.Connection) -> list[str]:
+        """v1 / v2 的 `vectors` 有两个问题：
 
         1. 缺少审计列（`kind` / `embed_input` / `created_at`）
         2. `UNIQUE(shot_id, frame_id)` 只允许每帧**一条**向量 —— 而 TASK-010 要让
@@ -268,7 +315,6 @@ class Library:
         }
         if not existing:
             return []  # executescript 刚建好的就是目标结构
-
         if set(VECTOR_COLUMNS) <= existing and Library._has_space_unique(connection):
             return []
 
@@ -296,6 +342,55 @@ class Library:
         )
         connection.execute("DROP TABLE vectors_pre_t10")
         actions.append("rebuild:vectors(unique=shot_id,frame_id,provider,model)")
+        return actions
+
+    @staticmethod
+    def _migrate_shot_key(connection: sqlite3.Connection) -> list[str]:
+        """v3 → v4：给 `shots` 加**持久标识** `shot_key` 并回填。
+
+        TASK-012a：`shots.id` 是自增的，`replace_analysis` 走 DELETE + INSERT，
+        所以**每次重新分析 id 都变**（实测 1,2,3 → 4,5,6 → 7,8,9），
+        存了 id 的匹配结果就指向错镜头。
+
+        `shot_key` 由 **`(file_hash, start, end)`** 生成，不含任何自增 id，
+        重新分析后不变。
+        """
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(shots)")
+        }
+        if not columns:
+            return []  # 表还不存在
+
+        actions: list[str] = []
+        if "shot_key" not in columns:
+            connection.execute(
+                "ALTER TABLE shots ADD COLUMN shot_key TEXT NOT NULL DEFAULT ''"
+            )
+            actions.append("add:shots.shot_key")
+
+        # 回填：已有镜头按当前 file_hash + 时间码算 key。
+        # 用 `shot_key = ''` 作条件，所以重复执行不会覆盖已算好的 key。
+        rows = connection.execute(
+            "SELECT s.id, s.start_seconds, s.end_seconds, v.file_hash"
+            "  FROM shots s JOIN videos v ON v.id = s.video_id"
+            " WHERE s.shot_key = ''"
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                "UPDATE shots SET shot_key = ? WHERE id = ?",
+                (shot_key(row["file_hash"], row["start_seconds"], row["end_seconds"]),
+                 row["id"]),
+            )
+        if rows:
+            actions.append(f"backfill:shots.shot_key({len(rows)} 行)")
+
+        # **不是唯一索引** —— 同一份视频内容存在两个路径时（重复拷贝、
+        # 同一文件被两个扫描根收录），`(file_hash, start, end)` 会算出同一个 key，
+        # 那是**真·同一个镜头内容**，不该当作冲突。解析时用记录里的 `video_path`
+        # 优先消歧（见 `shot_by_key`）。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shots_key ON shots(shot_key)"
+        )
         return actions
 
     def exists(self) -> bool:
@@ -369,18 +464,25 @@ class Library:
         `{index, start, end, duration, frames: [{time, file}], labels: [str], vectors: [...]}`
         """
         with self.session() as connection:
+            video = connection.execute(
+                "SELECT file_hash FROM videos WHERE id = ?", (int(video_id),)
+            ).fetchone()
+            file_hash = str(video["file_hash"]) if video is not None else ""
+
             connection.execute("DELETE FROM shots WHERE video_id = ?", (video_id,))
             count = 0
             for shot in shots:
                 cursor = connection.execute(
                     "INSERT INTO shots(video_id, shot_index, start_seconds, end_seconds,"
-                    " duration_seconds, ai_provider, ai_model) VALUES(?,?,?,?,?,?,?)",
+                    " duration_seconds, shot_key, ai_provider, ai_model)"
+                    " VALUES(?,?,?,?,?,?,?,?)",
                     (
                         video_id,
                         int(shot["index"]),
                         float(shot["start"]),
                         float(shot["end"]),
                         float(shot["duration"]),
+                        shot_key(file_hash, shot["start"], shot["end"]),
                         ai_provider,
                         ai_model,
                     ),
@@ -539,7 +641,8 @@ class Library:
 
         sql = f"""
             SELECT v.id AS video_id, v.path AS video_path,
-                   s.id AS shot_id, s.shot_index, s.start_seconds, s.end_seconds,
+                   s.id AS shot_id, s.shot_key, s.shot_index,
+                   s.start_seconds, s.end_seconds,
                    s.duration_seconds,
                    group_concat(DISTINCT l.text) AS matched_labels,
                    (SELECT group_concat(text) FROM labels WHERE shot_id = s.id) AS shot_labels
@@ -603,6 +706,7 @@ class Library:
             SELECT ve.shot_id, ve.provider, ve.model, ve.dim, ve.vector,
                    ve.kind, ve.embed_input, ve.created_at,
                    s.shot_index, s.start_seconds, s.end_seconds, s.duration_seconds,
+                   s.shot_key,
                    v.id AS video_id, v.path AS video_path
               FROM vectors ve
               JOIN shots  s ON s.id = ve.shot_id
@@ -614,6 +718,7 @@ class Library:
         return [
             {
                 "shot_id": row["shot_id"],
+                "shot_key": row["shot_key"],
                 "video_id": row["video_id"],
                 "video_path": row["video_path"],
                 "shot_index": row["shot_index"],
@@ -712,6 +817,36 @@ class Library:
         data["labels"] = self.shot_labels([int(shot_id)]).get(int(shot_id), [])
         return data
 
+    def shots_by_key(
+        self, key: str, *, prefer_path: str | None = None
+    ) -> list[dict[str, Any]]:
+        """按**持久标识**找镜头。可能命中多个（同一份内容存在多个路径）。
+
+        `prefer_path` 是记录里存的原路径 —— 命中多个时把它排到最前，
+        因为"同一份视频的多个拷贝"里，当初引用的就是那一个。
+        文件被移动过也不怕：路径只是**排序偏好**，不是匹配条件。
+        """
+        sql = """
+            SELECT s.id AS shot_id, s.shot_key, s.shot_index,
+                   s.start_seconds, s.end_seconds, s.duration_seconds,
+                   v.id AS video_id, v.path AS video_path, v.file_hash AS video_hash
+              FROM shots s JOIN videos v ON v.id = s.video_id
+             WHERE s.shot_key = ?
+        """
+        with self.session() as connection:
+            rows = [dict(row) for row in connection.execute(sql, (str(key),)).fetchall()]
+        if prefer_path:
+            wanted = str(prefer_path)
+            rows.sort(key=lambda row: 0 if row["video_path"] == wanted else 1)
+        return rows
+
+    def shot_by_key(
+        self, key: str, *, prefer_path: str | None = None
+    ) -> dict[str, Any] | None:
+        """按持久标识解析出**当前**的镜头。解析不到返回 None（表示这条引用已失效）。"""
+        matches = self.shots_by_key(key, prefer_path=prefer_path)
+        return matches[0] if matches else None
+
     @staticmethod
     def _shot_row(row: sqlite3.Row) -> dict[str, Any]:
         matched = row["matched_labels"] or ""
@@ -720,6 +855,7 @@ class Library:
             "video_id": row["video_id"],
             "video_path": row["video_path"],
             "shot_id": row["shot_id"],
+            "shot_key": row["shot_key"],
             "shot_index": row["shot_index"],
             "start": round(row["start_seconds"], 3),
             "end": round(row["end_seconds"], 3),
