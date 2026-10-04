@@ -56,7 +56,7 @@ XBC/
 │  ├─ hello_xbc/             机制验证插件
 │  ├─ text_toolbox/          真实业务插件：纯本地文本处理
 │  └─ video_analyzer/        真实业务插件：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取
-├─ tests/                    278 项测试
+├─ tests/                    280 项测试
 └─ docs/                     技术方案、测试报告、调研报告
 ```
 
@@ -95,9 +95,8 @@ python run.py skill list
 python run.py skill load text-cleanup
 
 # AI 能力（本地模型；插件只能通过 ctx.ai 使用，不得直接调模型）
-python run.py tool call ai_status --kwargs "{\"probe\": true}"
-python run.py tool call ai_text --kwargs "{\"prompt\": \"用一句话说明什么是镜头切分\"}"
-python run.py tool call ai_embed --kwargs "{\"texts\": [\"镜头切分\", \"关键帧\"]}"
+# 需要先在 config.json 里设置 ai.model（Core 不写死任何模型名）
+python run.py tool call ai_selftest --kwargs "{\"prompt\": \"用一句话介绍你自己\"}"
 
 # 桌面管理入口（插件列表/状态、启用停用、Tool 与 Skill 列表）
 python run.py ui
@@ -106,7 +105,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 123 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 280 tests / OK
 ```
 
 ---
@@ -334,7 +333,7 @@ python -m venv .venv
 | `hello_xbc` | 机制验证（生命周期、能力、错误隔离） | `hello_probe` / `hello_greet` / `hello_fail` |
 | `text_toolbox` | 真实业务：纯本地文本处理 | `text_defaults` / `text_stats` / `text_dedupe` / `text_export` |
 | `video_analyzer` | 真实业务：基于 FFmpeg 的视频结构分析 | `video_probe` / `video_split_shots` / `video_extract_keyframes` / `video_analyze` |
-| `ai_test_plugin` | 验证 AI 能力层：只通过 `ctx.ai` 说话 | `ai_status` / `ai_text` / `ai_vision` / `ai_embed` |
+| `ai_test_plugin` | 验收 AI 能力层：只通过 `ctx.ai` 说话 | `ai_selftest` |
 
 ### video_analyzer
 
@@ -364,42 +363,52 @@ python run.py tool call video_analyze --kwargs "{`"path`": `"D:/clip.mp4`"}"
 
 ## AI 能力层
 
-AI 是 **Core Capability**：插件通过 `ctx.ai` 使用，**不允许**直接调模型、直接发 HTTP、
-直接 import 某个模型的 SDK。这条不是口号 —— 有一条测试会扫描所有插件源码，
-发现 `requests` / `httpx` / `ollama` / `openai` / `urllib.request` 等就失败。
+AI 是 **Core Capability**，位于 `src/xbc/core/capabilities/ai/`：
+插件通过 `ctx.ai` 使用，**不允许**直接调模型、直接发 HTTP、直接 import 某个模型的 SDK。
+这条不是口号 —— 有测试对 `plugins/` 做**字面 grep**与 `ast` 双重扫描，出现即失败。
 
 > 完整验收结果见 [《AI Capability Layer V1 测试报告》](docs/ai-capability-v1-test-report.md)。
 
 ### 三个能力入口
 
 ```python
-ctx.ai.text_generate("写一句自我介绍")                       # → TextResult
-ctx.ai.vision_analyze("描述这张图", images=[path])            # → TextResult
-ctx.ai.embedding(["第一段", "第二段"])                        # → EmbeddingResult
+ctx.ai.text_generate("写一句自我介绍")      # → TextResult(text, usage, provider, model)
+ctx.ai.vision_analyze("D:/pic.png")         # → VisionResult(description, labels, ...)
+ctx.ai.embedding(["第一段", "第二段"])       # → EmbeddingResult(vectors, dim, provider, model)
 ```
 
-结果类型带 `provider` / `model` / `usage`，所以出问题时能说清**是谁生成的**。
-`json_mode=True` 时用 `result.json()` 拿解析后的对象。
+几个刻意的设计：
+
+- **`vision_analyze` 返回结构化结果**（`description` + `labels`），不是一段字符串 ——
+  否则每个插件都要自己去解析模型的自然语言，等于把提示词工程推给所有人。
+- **`vision_analyze` 只接受本地图片路径**：不接受 base64、不接受 URL。传错形态会明确报错。
+- 结果都带 `provider` / `model`，出问题时能说清**是谁生成的**。
+
+### 向量的跨 Provider 约束
+
+**`embedding` 的结果不允许跨 Provider 或跨模型混用。**
+
+不同 Provider 的向量维度可能不同，连加减都不合法；即使维度碰巧相同，
+不同模型的语义坐标系也不同 —— 在 A 模型里"余弦相似度 0.85"与在 B 模型里完全不是一回事。
+
+所以：**只有在 `provider` 与 `model` 都相同时，两组向量才可比较。**
+结果对象带上 `provider` / `model` / `dim` 就是为了让调用方**能**做这个判断。
 
 ### Provider 机制
 
-插件只依赖能力层，**Provider 是内核的装配细节**。换 Provider 不需要改任何插件代码：
+插件只依赖能力层，**Provider 是内核的装配细节**。换 Provider 只改配置：
 
-```python
-ctx.ai.text_generate("你好", provider="openai_compatible")   # 也可以按调用指定
-```
+| Provider | 说明 |
+|---|---|
+| `ollama` | 本地模型（第一实现，本地优先） |
+| `openai_compatible` | 兼容 OpenAI 形状的通道（第二实现，用于验证可替换性） |
 
-| Provider | 状态 | 文本 | 视觉 | 向量 |
-|---|---|---|---|---|
-| `ollama` | 本地，默认注册 | ✅ | ✅ | ✅ |
-| `openai_compatible` | **接口预留**，配置了 `base_url` 才注册 | ✅ | ✅ | ✅ |
+`openai_compatible` 是一条**通道**而不是单一厂商：DeepSeek、OpenAI、Claude、
+自建网关都能走它，差别只在 `base_url` 与模型名。它的正确性由**本地 mock 服务**逐字段验证，
+不连接任何外部服务。
 
-`openai_compatible` 是一个**通道**而不是单一厂商：DeepSeek、OpenAI、Claude、
-自建网关都能走它，只需改 `base_url` 与模型名。它的正确性是**用本地假服务验证的**，
-没有连接任何真实云端。
-
-**加一个新厂商** = 在 `capabilities/ai/providers/` 加一个模块 + 登记一行；
-内核其他地方与**所有插件**都不需要动。
+**内核里没有 Provider 注册表** —— 加第三个厂商 = 在 `providers/` 加一个模块 +
+在 `service.py` 的装配分支里加一段，**不改任何插件**。
 
 ### 配置
 
@@ -409,25 +418,17 @@ ctx.ai.text_generate("你好", provider="openai_compatible")   # 也可以按调
     "provider": "ollama",
     "model": "",
     "embedding_model": "",
-    "ollama": {
-      "url": "http://127.0.0.1:11434",
-      "model": "qwen2.5vl:3b",
-      "embedding_model": "nomic-embed-text",
-      "timeout": 180,
-      "options": { "temperature": 0.1, "num_ctx": 8192, "num_predict": 700 }
-    },
-    "openai_compatible": {
-      "base_url": "",
-      "model": "",
-      "embedding_model": "",
-      "api_key_secret": "openai_compatible_api_key"
-    }
+    "options": {},
+    "ollama": { "url": "http://127.0.0.1:11434" },
+    "openai_compatible": { "base_url": "", "api_key_secret": "openai_compatible_api_key" }
   }
 }
 ```
 
-**模型名解析顺序**：`ai.model` → `ai.<provider>.model` → Provider 内置默认。
-全局项优先 —— `ai.model` 才是用户直接操作的旋钮。
+- `model` / `embedding_model` —— **Core 里不写死任何模型名**。留空时调用会报明确错误
+  （含 provider 名、原因、检查建议），而不是静默失败。
+- `options` —— 原样交给 Provider 的参数：`temperature` / `num_ctx` / `num_predict` / `timeout`。
+- `ollama.url` / `openai_compatible.base_url` —— 只是**连接信息**，不是扩展点。
 
 几条实际踩过的坑：
 
@@ -440,7 +441,7 @@ ctx.ai.text_generate("你好", provider="openai_compatible")   # 也可以按调
 
 ### 状态查询默认不联网
 
-`ctx.ai.status()` 默认只报告"注册了谁、支持什么、配置齐不齐"，**不做网络探测**。
+`ctx.ai.status()` 默认只报告"装配了谁、支持什么、配置齐不齐"，**不做网络探测**。
 状态查询会被放在热路径上（插件列表、界面刷新），在那里联网会让界面卡几秒。
 需要真实可用性时显式传 `probe=True`（`doctor` 就是这么做的）。
 

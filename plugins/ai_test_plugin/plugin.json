@@ -1,47 +1,27 @@
 {
   "id": "ai_test_plugin",
-  "name": "AI 能力测试插件",
+  "name": "AI 能力自检",
   "version": "0.1.0",
   "spec_version": "1.0",
   "api_version": "1.0",
   "entry": "plugin.py:AITestPlugin",
-  "description": "验证 AI 能力层：只通过 ctx.ai 调用模型，不接触任何模型 SDK、不发任何 HTTP。",
+  "description": "验收用：依次调用文本生成、视觉理解、向量化三个 AI 能力，验证插件只通过 Core 调用能力层。",
   "author": "夏半仓",
   "capabilities": ["ai", "files", "settings"],
   "tools": [
     {
-      "name": "ai_status",
-      "description": "查看已注册的 AI Provider、各自支持的能力与默认 Provider",
-      "risk": "read"
-    },
-    {
-      "name": "ai_text",
-      "description": "调用 AI 能力层的文本生成（text_generate）",
-      "risk": "read"
-    },
-    {
-      "name": "ai_vision",
-      "description": "调用 AI 能力层的视觉理解（vision_analyze）",
-      "risk": "read"
-    },
-    {
-      "name": "ai_embed",
-      "description": "调用 AI 能力层的向量化（embedding）",
+      "name": "ai_selftest",
+      "description": "依次调用文本生成、视觉理解、向量化，返回三步各自的结果",
       "risk": "read"
     }
   ],
   "config_schema": {
     "type": "object",
     "properties": {
-      "prompt_prefix": {
+      "text_prompt": {
         "type": "string",
-        "default": "",
-        "description": "给每条提示词自动加的前缀（用于演示配置能影响行为）"
-      },
-      "preferred_provider": {
-        "type": "string",
-        "default": "",
-        "description": "指定用哪个 Provider；留空则由能力层自动路由"
+        "default": "用一句话介绍你自己。",
+        "description": "文本生成步骤用的提示词"
       }
     }
   }

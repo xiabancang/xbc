@@ -1,19 +1,19 @@
 """模型 Provider 抽象。
 
-插件只依赖 `AIService`，**永远不直接依赖 Provider**。
-Provider 是内核的装配细节：换一个实现，插件一行都不用改。
+插件只依赖 `AIService`，**永远不直接依赖 Provider**。Provider 是内核的装配细节：
+换一个实现，插件一行都不用改。
 
 Provider 声明自己支持哪些能力（`capabilities`），`AIService` 据此路由 ——
 "某个 Provider 不支持 embedding"不会等到调用时才炸，选 Provider 的那一刻就能说清理由。
 
 三类方法接收**请求对象**（`TextRequest` / `VisionRequest` / `EmbeddingRequest`），
-返回**结果对象**（`TextResult` / `EmbeddingResult`）。
+返回**结果对象**（`TextResult` / `VisionResult` / `EmbeddingResult`）。
 
-这里同时提供几个共用工具：
+## 视觉能力的输出契约
 
-- `encode_image()` / `image_data_url()`：图片编码（视觉能力的共同前置）
-- `request_json()`：统一的 HTTP 调用与错误翻译，让每个 Provider 不必各写一遍
-  超时、错误码、非 JSON 响应的处理
+`vision_analyze` 必须返回 `VisionResult`（`description` + `labels`），**不是字符串**。
+这意味着每个视觉 Provider 都要负责把模型的自由文本收敛成这个结构 ——
+把提示词工程留在内核这一层，而不是推给每一个插件。
 """
 
 from __future__ import annotations
@@ -30,11 +30,13 @@ from typing import Any
 from .request import EmbeddingRequest, TextRequest, VisionRequest
 from .types import (
     AICapability,
+    AIError,
     AIResponseError,
     AIUnavailable,
     AIUnsupported,
     EmbeddingResult,
     TextResult,
+    VisionResult,
 )
 
 
@@ -64,14 +66,10 @@ class ModelProvider(ABC):
         """已知模型列表（用于诊断；拿不到就返回空）。"""
         return []
 
-    def default_model(self, capability: AICapability) -> str:
-        """该能力默认用哪个模型。"""
-        return ""
-
     def text_generate(self, request: TextRequest) -> TextResult:
         raise AIUnsupported(f"Provider {self.name!r} 不支持文本生成（text_generate）")
 
-    def vision_analyze(self, request: VisionRequest) -> TextResult:
+    def vision_analyze(self, request: VisionRequest) -> VisionResult:
         raise AIUnsupported(f"Provider {self.name!r} 不支持视觉理解（vision_analyze）")
 
     def embedding(self, request: EmbeddingRequest) -> EmbeddingResult:
@@ -85,8 +83,7 @@ class ModelProvider(ABC):
         """给诊断用的自述。
 
         `probe=False` 时**不联网**，只报告结构信息（配置是否齐备、支持哪些能力）。
-        这个区分很重要：状态查询会被放在热路径上（插件列表、界面刷新），
-        在那里做网络探测会让整个界面卡住几秒。
+        状态查询会被放在热路径上（插件列表、界面刷新），在那里做网络探测会让界面卡几秒。
         """
         data: dict[str, Any] = {
             "name": self.name,
@@ -104,28 +101,92 @@ class ModelProvider(ABC):
         return f"<ModelProvider {self.name} capabilities={sorted(str(c) for c in self.capabilities)}>"
 
 
-#: 兼容旧名字。新代码请用 `ModelProvider`。
-AIProvider = ModelProvider
+# ---------------- 视觉结果的解析 ----------------
+
+#: 视觉能力的**内置抽取提示词**。
+#:
+#: 调用方不能自定义它（第一版不做可配置提示词）—— 目的就是让"视觉理解"这件事
+#: 在所有插件之间行为一致：同一张图，谁来问都得到同构的 description + labels。
+_VISION_PROMPT = (
+    "请分析这张图片，并**只**输出一个 JSON 对象，不要输出任何其他文字或代码块标记。\n"
+    '格式：{"description": "对画面的客观描述", "labels": ["标签1", "标签2"]}\n'
+    "要求：description 用一到三句话描述画面内容；labels 给出 3 到 8 个简短标签。"
+)
+
+
+def parse_vision_payload(text: str) -> tuple[str, list[str]]:
+    """把模型输出解析成 `(description, labels)`。
+
+    **容错优先**：模型没给出合法 JSON 时，把整段文本当作 description，labels 置空 ——
+    而不是抛错让整条链路失败。视觉是"给人的信息"，降级比失败更有用。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "", []
+
+    candidate = raw
+    # 容忍 ```json ... ``` 包裹
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`")
+        if candidate.lower().startswith("json"):
+            candidate = candidate[4:]
+        candidate = candidate.strip()
+    # 容忍前后有解释性文字：截取第一个 { 到最后一个 }
+    start, end = candidate.find("{"), candidate.rfind("}")
+    if start != -1 and end > start:
+        candidate = candidate[start : end + 1]
+
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return raw, []
+
+    if not isinstance(data, dict):
+        return raw, []
+
+    description = data.get("description")
+    if not isinstance(description, str) or not description.strip():
+        description = raw
+
+    labels: list[str] = []
+    raw_labels = data.get("labels")
+    if isinstance(raw_labels, list):
+        for item in raw_labels:
+            text_item = str(item).strip()
+            if text_item and text_item not in labels:
+                labels.append(text_item)
+
+    return description.strip(), labels
 
 
 # ---------------- 共用工具 ----------------
 
 
 def encode_image(source: Any) -> str:
-    """把图片（路径 / bytes）转成 base64 字符串。"""
+    """把**本地图片文件**读成 base64。
+
+    第一版只支持本地路径：传原始字节、http(s) URL 或 `data:` URL 都会明确报错，
+    而不是悄悄接受一种"看起来也行"的形态。
+    """
     if isinstance(source, (bytes, bytearray)):
-        return base64.b64encode(bytes(source)).decode("ascii")
-    path = Path(str(source))
-    if not path.is_file():
-        raise AIResponseError(f"图片文件不存在：{path}")
-    return base64.b64encode(path.read_bytes()).decode("ascii")
+        raise AIError("vision_analyze 只接受本地图片路径，不接受原始字节")
+
+    text = str(source or "").strip()
+    lowered = text.lower()
+    if lowered.startswith(("http://", "https://")):
+        raise AIError(f"vision_analyze 只接受本地图片路径，不接受网络 URL：{text[:80]}")
+    if lowered.startswith("data:"):
+        raise AIError("vision_analyze 只接受本地图片路径，不接受 base64 data URL")
+
+    file = Path(text)
+    if not file.is_file():
+        raise AIError(f"图片文件不存在：{file}")
+    return base64.b64encode(file.read_bytes()).decode("ascii")
 
 
 def image_data_url(source: Any) -> str:
-    """把图片转成 data URL（OpenAI 兼容接口用这个格式）。"""
-    suffix = ".jpeg"
-    if not isinstance(source, (bytes, bytearray)):
-        suffix = Path(str(source)).suffix.lower() or ".jpeg"
+    """把本地图片转成 data URL（OpenAI 兼容接口用这个格式）。"""
+    suffix = Path(str(source)).suffix.lower() or ".jpeg"
     mime = {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}.get(suffix, "image/jpeg")
     return f"data:{mime};base64,{encode_image(source)}"
 
@@ -133,7 +194,7 @@ def image_data_url(source: Any) -> str:
 def base_url(url: str) -> str:
     """把可能带端点的 URL 规范化成基址。
 
-    兼容老配置：V1 之前的 `ai.ollama.url` 形如 `http://localhost:11434/api/generate`。
+    兼容老配置：更早版本的 `ai.ollama.url` 形如 `http://localhost:11434/api/generate`。
 
     **不要剥掉 `/v1`** —— OpenAI 兼容服务的基址惯例就是带 `/v1` 的
     （`https://api.openai.com/v1`）。早先的实现把它一起剥了，
@@ -230,13 +291,13 @@ def probe_available(url: str, timeout: int = 2) -> bool:
 
 
 __all__ = [
-    "AIProvider",
     "ModelProvider",
     "base_url",
     "encode_image",
     "get_json",
     "image_data_url",
     "opener_for",
+    "parse_vision_payload",
     "probe_available",
     "request_json",
 ]

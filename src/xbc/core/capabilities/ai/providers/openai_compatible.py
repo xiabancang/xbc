@@ -1,33 +1,22 @@
-"""OpenAI 兼容接口 Provider —— **API 模型接口预留**。
-
-## 它预留了什么
+"""OpenAI 兼容 Provider —— 第二实现，用来验证「Provider 可替换」。
 
 只要一个服务实现了 OpenAI 的 `/chat/completions` 与 `/embeddings` 形状，
-就能作为 Provider 接进来：
+就能接进来：DeepSeek、OpenAI、Claude、自建网关，都走这一条通道，
+差别只在 `base_url` 与模型名。
 
-- **DeepSeek**（`https://api.deepseek.com/v1`）
-- **OpenAI**（`https://api.openai.com/v1`）
-- **Claude**（走其 OpenAI 兼容端点）
-- 任何自建网关 / 企业内网模型
-
-接进来只需要在配置里填 `ai.openai_compatible.base_url` 与模型名，
-**插件侧一行都不用改**。
-
-## 它默认不注册
-
-只有配置了 `base_url` 才会出现在可用 Provider 列表里 ——
-"预留接口"不该影响开箱即用的本地体验。
+**它默认不出现**：只有配置了 `ai.openai_compatible.base_url` 才会被装配。
+"本地模型优先"是硬约束，云端通道不该在用户没要求时冒出来。
 
 ## 凭证
 
-API Key 从 `secrets.json` 读取后由内核注入。
-**本模块只把它放进请求头，不写日志、不进错误信息**（错误里只出现服务地址）。
+API Key 从 `secrets.json` 读取后由内核注入。**本模块只把它放进请求头**，
+不写日志、不进错误信息（错误里只出现服务地址）。
 
-## 关于"禁止云端账号"
+## 它是真实实现，不是预留接口
 
-禁止的是**云端账号体系**（登录、会员、租户）。这里只是一个 HTTP 客户端实现，
-不涉及任何账号、登录或用户概念。它的正确性是用**本地假服务**验证的，
-没有连接任何真实云端。
+正确性由 `tests/test_ai_capability.py` 里的**本地 mock server** 逐字段验证：
+请求路径、`Authorization` 头、多模态 content 结构、响应解析、缺密钥时不发请求。
+全程不连接任何外部服务。
 """
 
 from __future__ import annotations
@@ -36,8 +25,10 @@ from typing import Any
 
 from ..provider import (
     ModelProvider,
+    _VISION_PROMPT,
     base_url,
     image_data_url,
+    parse_vision_payload,
     request_json,
 )
 from ..request import EmbeddingRequest, TextRequest, VisionRequest
@@ -47,6 +38,7 @@ from ..types import (
     AIUnavailable,
     EmbeddingResult,
     TextResult,
+    VisionResult,
 )
 
 
@@ -79,35 +71,56 @@ class OpenAICompatibleProvider(ModelProvider):
     def _embeddings_url(self) -> str:
         return f"{self.base}/embeddings"
 
+    # ---------- 错误信息（provider 名 + 原因 + 检查建议）----------
+    def _unavailable(self, reason: str) -> AIUnavailable:
+        return AIUnavailable(
+            f"provider={self.name} 不可用\n"
+            f"原因：{reason}\n"
+            "检查建议：1) 确认 ai.openai_compatible.base_url 正确且服务可访问；"
+            "2) 确认 secrets.json 里的 API Key 有效；"
+            "3) 或把 config.json 的 ai.provider 改回 ollama。"
+        )
+
+    def _require_model(self, model: str, *, embedding: bool = False) -> str:
+        if model:
+            return model
+        key = "ai.embedding_model" if embedding else "ai.model"
+        raise AIUnavailable(
+            f"provider={self.name} 缺少模型配置\n"
+            f"原因：{key} 未设置，无法确定要调用哪个模型\n"
+            f"检查建议：在 config.json 里设置 {key}，注意要写**该服务方**的模型名。"
+        )
+
     # ---------- 可用性 ----------
     def configured(self) -> bool:
-        """地址与 Key 都配齐才算配置完成（不联网、不探测，避免费额度）。"""
+        """地址与 Key 都配齐才算配置完成（不联网、不探测，避免白费额度）。"""
         return bool(self.base and self._api_key)
 
     def available(self) -> bool:
         return self.configured()
-
-    def default_model(self, capability: AICapability) -> str:
-        return self.embedding_model if capability is AICapability.EMBEDDING else self.model
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
 
     def _require_ready(self) -> None:
         if not self.base:
-            raise AIUnavailable("未配置 ai.openai_compatible.base_url")
+            raise self._unavailable("未配置 ai.openai_compatible.base_url")
         if not self._api_key:
-            raise AIUnavailable(
-                "未配置 API Key；请把密钥写进 secrets.json，"
-                "并在 ai.openai_compatible.api_key_secret 里填键名"
+            raise self._unavailable(
+                "未配置 API Key（secrets.json 里没有对应的键）"
             )
 
-    # ---------- 文本 / 视觉 ----------
+    # ---------- 调用 ----------
+    def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return request_json(
+                url, payload=payload, headers=self._headers(), timeout=self.timeout
+            )
+        except AIUnavailable as exc:
+            raise self._unavailable(str(exc)) from exc
+
     def _messages(
-        self,
-        prompt: str,
-        images: list[Any] | None,
-        system: str | None,
+        self, prompt: str, images: list[str] | None, system: str | None
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         if system:
@@ -121,26 +134,15 @@ class OpenAICompatibleProvider(ModelProvider):
             messages.append({"role": "user", "content": prompt})
         return messages
 
-    def _chat(self, request: TextRequest, images: list[Any] | None) -> TextResult:
-        self._require_ready()
-        chosen = request.model or self.model
-        if not chosen:
-            raise AIUnavailable("没有配置模型名：请设置 ai.model 或 ai.openai_compatible.model")
-
-        payload: dict[str, Any] = {
-            "model": chosen,
-            "messages": self._messages(request.prompt, images, request.system),
-        }
-        if request.json_mode:
+    def _chat(
+        self, prompt: str, *, system: str | None, images: list[str] | None,
+        model: str, json_mode: bool,
+    ) -> TextResult:
+        payload: dict[str, Any] = {"model": model, "messages": self._messages(prompt, images, system)}
+        if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        if request.temperature is not None:
-            payload["temperature"] = request.temperature
-        if request.max_tokens is not None:
-            payload["max_tokens"] = request.max_tokens
 
-        data = request_json(
-            self._chat_url, payload=payload, headers=self._headers(), timeout=self.timeout
-        )
+        data = self._post(self._chat_url, payload)
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             raise AIResponseError(f"响应里没有 choices：{str(data)[:200]}")
@@ -154,44 +156,47 @@ class OpenAICompatibleProvider(ModelProvider):
         return TextResult(
             text=text,
             provider=self.name,
-            model=str(data.get("model") or chosen),
+            model=str(data.get("model") or model),
             usage={
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
-                "finish_reason": first.get("finish_reason"),
             },
         )
 
+    # ---------- 三种能力 ----------
     def text_generate(self, request: TextRequest) -> TextResult:
-        return self._chat(request, None)
+        self._require_ready()
+        model = self._require_model(self.model)
+        return self._chat(
+            request.prompt, system=request.system, images=None, model=model, json_mode=False
+        )
 
-    def vision_analyze(self, request: VisionRequest) -> TextResult:
+    def vision_analyze(self, request: VisionRequest) -> VisionResult:
         if not request.images:
-            raise AIResponseError("vision_analyze 至少需要一张图片")
-        return self._chat(request, list(request.images))
+            raise AIResponseError("vision_analyze 至少需要一张本地图片路径")
+        self._require_ready()
+        model = self._require_model(self.model)
+        generated = self._chat(
+            _VISION_PROMPT, system=None, images=list(request.images), model=model, json_mode=True
+        )
+        description, labels = parse_vision_payload(generated.text)
+        return VisionResult(
+            description=description,
+            labels=labels,
+            provider=self.name,
+            model=generated.model,
+            raw=generated.text,
+            usage=generated.usage,
+        )
 
-    # ---------- 向量化 ----------
     def embedding(self, request: EmbeddingRequest) -> EmbeddingResult:
         items = [str(text) for text in request.texts]
         if not items:
-            return EmbeddingResult(
-                vectors=[], provider=self.name, model=request.model or self.embedding_model
-            )
+            return EmbeddingResult(vectors=[], provider=self.name, model=self.embedding_model)
         self._require_ready()
+        model = self._require_model(self.embedding_model, embedding=True)
 
-        chosen = request.model or self.embedding_model
-        if not chosen:
-            raise AIUnavailable(
-                "没有配置向量模型名：请设置 ai.embedding_model 或 "
-                "ai.openai_compatible.embedding_model"
-            )
-
-        data = request_json(
-            self._embeddings_url,
-            payload={"model": chosen, "input": items},
-            headers=self._headers(),
-            timeout=self.timeout,
-        )
+        data = self._post(self._embeddings_url, {"model": model, "input": items})
         rows = data.get("data")
         if not isinstance(rows, list) or len(rows) != len(items):
             raise AIResponseError(f"响应里没有与输入等长的 data：{str(data)[:200]}")
@@ -203,4 +208,4 @@ class OpenAICompatibleProvider(ModelProvider):
                 raise AIResponseError(f"向量条目格式不对：{str(row)[:120]}")
             vectors.append([float(value) for value in vector])
 
-        return EmbeddingResult(vectors=vectors, provider=self.name, model=chosen)
+        return EmbeddingResult(vectors=vectors, provider=self.name, model=model)

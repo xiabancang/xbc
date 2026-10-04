@@ -26,31 +26,23 @@ DEFAULTS: dict[str, Any] = {
         "ffprobe_path": "ffprobe",
     },
     "ai": {
-        # 默认用哪个 Provider
+        # 用哪个 Provider。内核只实现了这两个名字（见 capabilities/ai/service.py）。
         "provider": "ollama",
-        # 全局模型名：用户直接操作的旋钮。
-        # 优先于各 Provider 段里的 model —— 否则用户在 ai.model 里选了模型，
-        # 却会被 ai.ollama.model 的内置默认值悄悄盖掉。留空则用 Provider 自己的设置。
+        # 模型名。**Core 里不写死任何模型名** —— 留空时调用会报明确错误
+        # （含 provider 名、原因、检查建议），而不是静默失败。
         "model": "",
+        # 向量模型与对话模型通常不是同一个，所以分开配。
         "embedding_model": "",
-        "ollama": {
-            # 用 127.0.0.1 而不是 localhost：Windows 上 localhost 会先试 IPv6 ::1，
-            # 失败后回退 IPv4，每次探测白等约 2 秒（实测）。
-            "url": "http://127.0.0.1:11434",
-            "model": "qwen2.5vl:3b",
-            "embedding_model": "nomic-embed-text",
-            "timeout": 180,
-            # 以下组合来自 V18 原型的已验证参数
-            "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 700},
-        },
-        # API 模型接口预留：base_url 为空时**不注册**，不影响本地开箱体验。
-        # 密钥放 secrets.json，这里只放它的键名。
+        # Provider 参数，原样交给 Provider：
+        # temperature / num_ctx / num_predict / timeout …
+        "options": {},
+        # 各 Provider 的**连接信息**（不是参数）。
+        # 用 127.0.0.1 而非 localhost：Windows 上 localhost 会先试 IPv6 ::1、
+        # 失败再回退 IPv4，每次探测白等约 2 秒（实测 2.07s vs 0.004s）。
+        "ollama": {"url": "http://127.0.0.1:11434"},
         "openai_compatible": {
             "base_url": "",
-            "model": "",
-            "embedding_model": "",
             "api_key_secret": "openai_compatible_api_key",
-            "timeout": 120,
         },
     },
     "plugins": {},

@@ -16,7 +16,6 @@
 from .ai import (
     AICapability,
     AIError,
-    AIProvider,
     AIResponseError,
     AIService,
     AIUnavailable,
@@ -26,8 +25,8 @@ from .ai import (
     OllamaProvider,
     OpenAICompatibleProvider,
     TextResult,
+    VisionResult,
     build_ai_service,
-    register_provider_factory,
 )
 from .events import EventBus
 from .ffmpeg import FFmpegService
@@ -37,7 +36,6 @@ from .settings import SettingsCapability, mask_secret
 __all__ = [
     "AICapability",
     "AIError",
-    "AIProvider",
     "AIResponseError",
     "AIService",
     "AIUnavailable",
@@ -51,7 +49,7 @@ __all__ = [
     "OpenAICompatibleProvider",
     "SettingsCapability",
     "TextResult",
+    "VisionResult",
     "build_ai_service",
     "mask_secret",
-    "register_provider_factory",
 ]

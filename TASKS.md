@@ -309,50 +309,66 @@ FFmpeg 子进程、产出多个文件、返回嵌套结构化结果，并且停�
 | 原则 | 落实方式 |
 |---|---|
 | AI 属于 Core Capability | 位于 `src/xbc/core/capabilities/ai/`，通过 `ctx.ai` 暴露 |
-| Plugin 禁止直接调用模型 | 由 `ast` 扫描测试强制，不是文档约定 |
-| Provider 可替换 | `ModelProvider` 抽象 + 注册表；换 Provider 只改配置 |
-| 本地模型优先 | Ollama 始终注册；`openai_compatible` 未配置则不出现 |
+| Plugin 禁止直接调用模型 SDK / HTTP 客户端 | 字面 grep + `ast` 双重扫描测试强制，不是文档约定 |
+| Provider 可替换 | `ModelProvider` 抽象 + 配置驱动装配；换 Provider 只改配置 |
+| 本地模型优先 | `ai.provider` 默认 `ollama` |
 | 不绑定单一厂商 | 请求/响应结构中立；`openai_compatible` 是通道，覆盖 DeepSeek/OpenAI/Claude/自建网关 |
-| Core 保持最小化 | 只依赖标准库（有测试断言）；无重试、无队列、无 Agent |
+| Core 保持最小化，不做预留扩展点 | **删除了 Provider 注册表**；无按调用可选参数、无旧版兼容方法；零第三方依赖（有测试断言） |
+| 不引入业务语义 | 18 条业务词表 + 词边界规则扫描 `capabilities/ai/` |
 
 **实现范围（全部达成）**：
 
 | # | 要求 | 实现 |
 |---|---|---|
-| 1 | AI Capability 接口 | `AIService` + `ModelProvider` + `TextRequest`/`VisionRequest`/`EmbeddingRequest` + `TextResult`/`EmbeddingResult` |
-| 2 | Provider 机制 | `providers/ollama.py`、`providers/openai_compatible.py` + `registry.py`（加厂商不必改内核别处） |
-| 3 | 第一批能力 | `text_generate` / `vision_analyze` / `embedding` |
-| 4 | 配置系统 | `ai.provider` + `ai.model` + 各 Provider 参数段；密钥走 `secrets.json` |
-| 5 | 测试插件 | `plugins/ai_test_plugin/`（4 个工具，只通过 `ctx.ai` 说话） |
+| 1 | AI Capability 接口 | `AIService` + `ModelProvider` + 三个能力各自的 Request / Response 结构 |
+| 2 | Provider 机制 | `providers/ollama.py`（第一实现，真实可用）、`providers/openai_compatible.py`（第二实现，验证可替换性） |
+| 3 | 第一批能力（仅三个） | `text_generate` / `vision_analyze` / `embedding` |
+| 4 | 配置系统 | `ai.provider` / `ai.model` / `ai.options`；密钥走 `secrets.json` |
+| 5 | 测试插件 | `plugins/ai_test_plugin/`（单工具 `ai_selftest`，依次调用三个能力） |
 
-**禁止**：Agent 系统、自动决策、工作流、Prompt 商城、云端账号、UI 美化、视频 AI 业务 —— 全部未做。
+**禁止**：Agent 系统、自动决策、工作流、Prompt 商城、云端账号、UI 美化、业务逻辑、
+任何"为将来预留"的空接口 —— 全部未做。
 
-**验收对照（6/6 通过）**：
+**验收对照（8/8 通过）**：
 
 | # | 验收标准 | 结果 | 证据 |
 |---|---|---|---|
-| 1 | 测试插件可以调用 AI | ✅ | 真机三种能力全部成功 |
-| 2 | 切换 Provider 无需修改插件代码 | ✅ | 三种切换方式下**插件源码哈希不变** |
-| 3 | Ollama 不可用时有明确错误 | ✅ | 错误含服务地址 + 排查建议 + 替代方案 |
-| 4 | AI Capability 属于 Core | ✅ | 位置正确；`ctx.ai` 为 `...ai.service.AIService`；零第三方依赖 |
-| 5 | 插件代码不存在直接模型调用 | ✅ | `ast` 扫描 4 个插件，违规 0 项 |
-| 6 | 全部测试通过 | ✅ | `Ran 278 tests ... OK`，双环境 |
+| 1 | 测试插件可调用三个能力，Ollama 环境真实跑通 | ✅ | 真机三步全成功（§报告 2） |
+| 2 | 切换 Provider 不改插件代码 | ✅ | **全文件哈希**：`plugin.json`+`plugin.py` 两次运行逐字节一致 |
+| 3 | Ollama 不可用时错误明确 | ✅ | 含 `provider=ollama` + `原因：` + `检查建议：` |
+| 4 | AI Capability 属于 Core | ✅ | 路径正确；`ctx.ai` 为 `...ai.service.AIService`；零第三方依赖；无 `registry.py` |
+| 5 | 插件无直接模型调用 | ✅ | 9 个插件源码：字面 grep 0 命中、`ast` 0 命中 |
+| 6 | Core 无业务耦合 | ✅ | 18 条业务词表（含词边界）扫描 `capabilities/ai/`：0 命中 |
+| 7 | 跨 Provider 约束写入文档与注释 | ✅ | `types.py` 模块文档 + 类注释 + README，三处均有测试断言 |
+| 8 | 全部测试通过 | ✅ | `Ran 280 tests ... OK`，双环境 |
 
 **真实环境验证**（本机 Ollama，非 mock）：
 
 ```
-text_generate    provider=ollama model=qwen2.5vl:3b   → "镜头切分是指在影视制作中，通过剪辑将多个镜头组合成…"
-vision_analyze   provider=ollama model=qwen2.5vl:3b   → "这张图里有彩色条纹和一个黑色的方块。"（测试图描述正确）
-embedding        provider=ollama model=nomic-embed-text → 768 维；同文本同向量
-换 Provider      ① ollama ② 进程内第三方 ③ 配置 ai.model → 三种方式下插件源码哈希均未变 ✅
+text_generate    provider=ollama model=qwen2.5vl:3b    → 模型实际输出（含 usage 计数）
+vision_analyze   provider=ollama model=qwen2.5vl:3b    → description + labels 结构化结果，与测试图相符
+embedding        provider=ollama model=nomic-embed-text → count=2  dim=768
+换 Provider      ollama(/api/generate) → openai_compatible(/v1/chat/completions)
+                 同一份插件、同一组参数，插件目录全文件哈希一致 ✅
 ```
 
-**怎么保证"插件不得直接调模型"不是一句空话**：四条测试守着 ——
-`ast` 扫描所有 `plugins/*/plugin.py`（违规导入即失败）、测试插件代码不得出现厂商名、
-模型端点字符串只允许出现在 `capabilities/ai/` 下、AI 能力层不得引入第三方依赖。
-**约束写进测试才守得住。**
+**怎么保证约束不是空话**：五条测试守着 —— 插件字面 grep、插件 `ast` import 扫描、
+插件只能从 `xbc.core.capabilities.ai` 取 AI、模型端点只允许出现在 `capabilities/ai/` 下、
+AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 
-**开发中发现并修复 5 个真缺陷**：
+**本轮按规格对齐时报告并裁决的 3 个冲突**：
+
+1. 原则 6「不做任何为未来预留的扩展点」与为"未来增加厂商"而建的 `registry.py` 冲突
+   → **裁决：删掉 registry，改显式装配**（加厂商改内核一处，但仍不改任何插件）。
+2. 验收 5 要求字面 grep 干净，但解释这条规则的文档字符串本身要写出被禁的词
+   → 改写文档字符串为"不 import 任何模型 SDK 或网络库"，使证据自洽。
+3. 「业务词」未界定且 `客户` 会误命中 `客户端` → 采用 18 条词表 + `客户(?!端)` 词边界。
+
+**为满足原则 6 而移除的项**（需要知晓）：`registry.py`、`AIService.set_default()`、
+按调用的 `provider=` / `model=` / `temperature=` / `max_tokens=` / `json_mode=` 参数、
+旧版兼容方法 `generate()`。参数统一由 `ai.options` 提供，避免同一参数两个来源。
+
+**开发中发现并修复 6 个真缺陷**：
 
 1. **`base_url()` 把 OpenAI 的 `/v1` 后缀剥掉了** —— 请求打到 `/chat/completions` 上直接 404，
    `openai_compatible` 整条链路不可用。`/v1` 是基址惯例，不能动。已修 + 回归测试。
@@ -361,19 +377,20 @@ embedding        provider=ollama model=nomic-embed-text → 768 维；同文本�
 3. **默认地址用 `localhost`** —— Windows 上先试 IPv6 `::1`、失败再回退 IPv4，
    **实测每次探测 2.07s vs 127.0.0.1 的 0.004s**。默认改为 `127.0.0.1`。
 4. **本地模型请求会走系统代理** —— 开发机装了 Clash 类代理时 `getproxies()` 会返回它，
-   连本地 Ollama 的请求可能绕到代理上。改为**回环地址显式绕过代理**，远端仍走系统代理。
+   连本地模型的请求可能绕到代理上。改为**回环地址显式绕过代理**，远端仍走系统代理。
 5. **每次生成前都做一次可用性预探测** —— 白多一个往返；且本机"连没人监听的端口"不退化
-   为拒绝而是挂满超时（2s），代价直接加到每次调用上。移除预探测，失败信息由 HTTP 调用
-   直接给出并附排查建议。
+   为拒绝而是挂满超时（2s），代价直接加到每次调用上。移除预探测。
+6. **自检插件里为生成向量预览重复调用了一次 embedding** —— 白多一次往返。改为复用同一结果。
 
-修完 B2–B5 与测试自身的服务关闭轮询优化后，整套测试从 **37s → 16.6s**。
+修完以上与测试自身的服务关闭轮询优化后，整套测试从 **37s → 14.5s**。
 
-**测试**：203 → **278 项**（`tests/test_ai_capability.py` 75 项：接口契约、两个 Provider 的
-协议级验证、插件端到端、Provider 替换、配置优先级、代理绕过、四条约束检查）。
+**测试**：203 → **280 项**（`tests/test_ai_capability.py` **77 项**：接口契约、视觉结果解析、
+两个 Provider 的协议级验证、插件端到端、Provider 全文件哈希对比、配置错误、
+代理绕过、跨 Provider 约束、业务词扫描、两条无直连证据）。
 
-**测试方式说明**：Provider 的正确性用**本地假模型服务**验证（标准库 `http.server`，
-同时实现 Ollama 与 OpenAI 两套协议形状），**不依赖真 Ollama、不连任何云端**，
-因此可确定性复现。真机 Ollama 用于端到端确认，两者互补。
+**测试方式说明**：Provider 的正确性用**本地 mock 服务**验证（标准库 `http.server`，
+同时实现两套协议形状），**不依赖真 Ollama、不连任何外部服务**，因此可确定性复现。
+真机 Ollama 用于端到端确认，两者互补。
 
 📄 完整报告：[docs/ai-capability-v1-test-report.md](docs/ai-capability-v1-test-report.md)
 
@@ -404,4 +421,4 @@ embedding        provider=ollama model=nomic-embed-text → 768 维；同文本�
 | 2026-10-04 | TASK-005 | 第一个真实业务插件 video_analyzer：FFmpeg 媒体信息 + 镜头切分 + 关键帧抽取，4 个 Tool 均返回结构化 JSON；新增内核能力 probe_media；修 1 个配置重载 bug；测试增至 153 项 |
 | 2026-10-04 | 修复 | 重复扫描被误报为"插件 id 重复"错误（长驻界面每点一次刷新就刷一屏 ERROR） |
 | 2026-10-04 | TASK-006 | 插件产品化基础：`.xbcplugin` 包格式（含 zip-slip 防护）、安装/卸载/升级、SemVer 版本比较、安装台账、用户数据目录分离；修 3 个真缺陷（其中"升级不生效"直接卡验收）；测试增至 203 项 |
-| 2026-10-05 | TASK-007 | AI Capability Layer V1：`ModelProvider` 抽象 + Request/Response 结构 + Provider 注册表；`providers/`（ollama / openai_compatible）；`text_generate` / `vision_analyze` / `embedding`；配置 `ai.provider` + `ai.model`；验收插件 `ai_test_plugin`；修 5 个真缺陷（`/v1` 被剥、status 默认联网、localhost 慢 2s、走系统代理、多余预探测）；测试增至 278 项；产出《AI Capability Layer V1 测试报告》 |
+| 2026-10-05 | TASK-007 | AI Capability Layer V1（按规格对齐版）：`AIService` + `ModelProvider` + Request/Response 结构；`providers/`（ollama / openai_compatible）；`text_generate` / `vision_analyze`（结构化 description+labels）/ `embedding`（dim）；配置 `ai.provider`/`ai.model`/`ai.options`；验收插件 `ai_test_plugin`（单工具 `ai_selftest`）；**删除 Provider 注册表**（原则 6）；修 6 个真缺陷；测试增至 280 项；产出《AI Capability Layer V1 测试报告》 |

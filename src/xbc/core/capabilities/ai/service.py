@@ -1,4 +1,4 @@
-"""AI 能力门面（TASK-007 第 1 项）。
+"""AI 能力门面（Core Capability）。
 
 ## 插件唯一能用的 AI 入口
 
@@ -7,34 +7,33 @@
 
 ```python
 result = ctx.ai.text_generate("写一句自我介绍")
-info = ctx.ai.vision_analyze("描述这张图", images=[path], json_mode=True)
+vision = ctx.ai.vision_analyze(["D:/pic.png"])
 vectors = ctx.ai.embedding(["第一段", "第二段"])
 ```
 
 这样做的实际收益（不是口号）：
 
 1. **换模型不改插件** —— Provider 是装配细节，配置里换个名字就行；
-2. 超时、重试策略、密钥、用量统计都在一处，不必每个插件重写；
+2. 超时、密钥、重试策略、错误形态都在一处，不必每个插件重写；
 3. 出问题时能说清"是谁、用什么模型、生成了什么"。
 
-## 能力路由
+## 装配：显式，不做注册表
 
-`provider=None` 时按**能力**挑：先看默认 Provider 支不支持，不支持就找其他注册了的。
-如果一个都没有，抛 `AIUnsupported` 并列出**谁支持这个能力** —— 而不是等网络请求失败。
+`build_ai_service()` 只认两个名字 —— `ollama` 与 `openai_compatible`。
+加第三个厂商要改这一处装配代码，但**不改任何插件**。
 
-## 装配
+## 未配置 / 不可用时：明确报错，不静默失败
 
-`build_ai_service()` 遍历**注册表**里的工厂（`registry.py`），
-每个工厂自己决定"这轮要不要出现"。所以增加厂商是加一个工厂 + 登记一行，
-内核其他地方与插件都不需要动。
+`build_ai_service()` 在"一个 Provider 都没装配起来"时，会把**具体原因**
+记在服务上；此后调用任一能力都会抛出带 **provider 名、原因、检查建议** 的
+`AIUnavailable`，而不是返回空值让调用方猜。
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
-from . import providers as _builtin_providers  # noqa: F401 - 导入即完成内置 Provider 登记
-from .registry import ProviderSettings, provider_factories
+from .providers import OllamaProvider, OpenAICompatibleProvider
 from .request import EmbeddingRequest, TextRequest, VisionRequest
 from .types import (
     AICapability,
@@ -43,18 +42,24 @@ from .types import (
     AIUnsupported,
     EmbeddingResult,
     TextResult,
+    VisionResult,
 )
 
 Disposer = Callable[[], Any]
+
+#: 内核实现的 Provider 名字。加厂商要改这里（以及下面 build_ai_service 的分支）。
+KNOWN_PROVIDERS = ("ollama", "openai_compatible")
 
 
 class AIService:
     """AI 能力门面。一个进程一份，由 `AppContext` 装配。"""
 
-    def __init__(self, logger: Any = None) -> None:
+    def __init__(self, logger: Any = None, configuration_error: str = "") -> None:
         self._providers: dict[str, Any] = {}
         self._default: str | None = None
         self._log = logger
+        #: "为什么一个 Provider 都没装配起来"，供报错时使用
+        self._configuration_error = configuration_error
 
     # ---------------- 装配 ----------------
     def register(self, provider: Any, *, default: bool = False) -> Disposer:
@@ -66,11 +71,6 @@ class AIService:
             self._default = provider.name
         return lambda: self._providers.pop(provider.name, None)
 
-    def set_default(self, name: str) -> None:
-        if name not in self._providers:
-            raise AIUnavailable(f"未注册的 Provider：{name!r}；已注册: {self.providers()}")
-        self._default = name
-
     @property
     def default_provider(self) -> str:
         return self._default or ""
@@ -80,10 +80,18 @@ class AIService:
 
     def provider(self, name: str | None = None, *, capability: AICapability | None = None) -> Any:
         """取一个 Provider。指定 `capability` 时会校验它确实支持该能力。"""
+        if not self._providers:
+            raise AIUnavailable(
+                self._configuration_error
+                or "没有可用的 AI Provider。检查建议：在 config.json 里设置 ai.provider。"
+            )
+
         if name is not None:
             found = self._providers.get(name)
             if found is None:
-                raise AIUnavailable(f"没有名为 {name!r} 的 Provider；已注册: {self.providers()}")
+                raise AIUnavailable(
+                    f"没有名为 {name!r} 的 Provider；已装配: {self.providers()}"
+                )
             if capability is not None and not found.supports(capability):
                 raise AIUnsupported(
                     f"Provider {name!r} 不支持 {capability}；"
@@ -94,12 +102,12 @@ class AIService:
         if capability is None:
             if self._default and self._default in self._providers:
                 return self._providers[self._default]
-            raise AIUnavailable(f"没有可用的 AI Provider；已注册: {self.providers()}")
+            raise AIUnavailable(f"没有可用的 AI Provider；已装配: {self.providers()}")
 
         candidates = self._providers_for(capability)
         if not candidates:
             raise AIUnsupported(
-                f"没有 Provider 支持 {capability}；已注册: {self.providers()}"
+                f"没有 Provider 支持 {capability}；已装配: {self.providers()}"
             )
         if self._default in candidates:
             return self._providers[self._default]
@@ -123,11 +131,11 @@ class AIService:
     def status(self, *, probe: bool = False) -> dict[str, dict[str, Any]]:
         """每个 Provider 的能力与状态。
 
-        **默认不联网**（`probe=False`）：只报告"注册了谁、各自支持什么、配置齐不齐"。
+        **默认不联网**（`probe=False`）：只报告"装配了谁、各自支持什么、配置齐不齐"。
         需要真实可用性时显式传 `probe=True`（`doctor` 就是这么做的）。
 
-        早先的版本默认做活性探测，结果一次状态查询要 4 秒 —— 状态查询会被放在
-        热路径上，这个代价不能接受。
+        早先的版本默认做活性探测，一次状态查询要 4 秒 —— 状态查询会被放在热路径上
+        （插件列表、界面刷新），这个代价不能接受。
         """
         report: dict[str, dict[str, Any]] = {}
         for name, provider in sorted(self._providers.items()):
@@ -149,142 +157,123 @@ class AIService:
             return False
 
     # ---------------- 三个能力入口 ----------------
-    def text_generate(
-        self,
-        prompt: str,
-        *,
-        system: str | None = None,
-        provider: str | None = None,
-        model: str | None = None,
-        json_mode: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> TextResult:
-        """文本生成。"""
-        chosen = self.provider(provider, capability=AICapability.TEXT)
-        return chosen.text_generate(
-            TextRequest(
-                prompt=prompt,
-                system=system,
-                model=model,
-                json_mode=json_mode,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        )
+    def text_generate(self, prompt: str, *, system: str | None = None) -> TextResult:
+        """文本生成。输入：提示词 + 可选 system。"""
+        chosen = self.provider(capability=AICapability.TEXT)
+        return chosen.text_generate(TextRequest(prompt=prompt, system=system))
 
-    def vision_analyze(
-        self,
-        prompt: str,
-        images: list[Any],
-        *,
-        system: str | None = None,
-        provider: str | None = None,
-        model: str | None = None,
-        json_mode: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> TextResult:
-        """视觉理解。
+    def vision_analyze(self, images: list[str] | str) -> VisionResult:
+        """视觉理解。输入：**本地图片路径**（单个或一组）。
 
-        `images` 可以是路径字符串、`Path` 或原始字节；由内核负责读文件与编码。
-
-        **注意**：传路径时，内核会替插件读文件。因此需要"看图"的插件
-        应当同时声明 `files` 能力 —— 这是当前版本已知且接受的取舍
-        （与 `ffmpeg` 能力接受路径一致）。
+        只接受本地路径 —— 不接受 base64、不接受 URL。传错形态会明确报错。
+        输出是结构化的 `VisionResult`（`description` + `labels`），不是一段字符串。
         """
-        chosen = self.provider(provider, capability=AICapability.VISION)
-        return chosen.vision_analyze(
-            VisionRequest(
-                prompt=prompt,
-                system=system,
-                model=model,
-                json_mode=json_mode,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                images=list(images),
-            )
-        )
+        paths = [images] if isinstance(images, str) else list(images)
+        chosen = self.provider(capability=AICapability.VISION)
+        return chosen.vision_analyze(VisionRequest(images=[str(p) for p in paths]))
 
-    def embedding(
-        self,
-        texts: list[str] | str,
-        *,
-        provider: str | None = None,
-        model: str | None = None,
-    ) -> EmbeddingResult:
-        """向量化。传单个字符串也可以。"""
+    def embedding(self, texts: list[str] | str) -> EmbeddingResult:
+        """向量化。输入：一段或多段文本。
+
+        **返回值不可跨 Provider / 跨模型混用** —— 详见 `types.py` 开头那一段。
+        """
         items = [texts] if isinstance(texts, str) else list(texts)
-        chosen = self.provider(provider, capability=AICapability.EMBEDDING)
-        return chosen.embedding(EmbeddingRequest(texts=items, model=model))
-
-    # ---------------- 兼容旧接口 ----------------
-    def generate(
-        self,
-        prompt: str,
-        images: list[Any] | None = None,
-        *,
-        provider: str | None = None,
-        json_mode: bool = False,
-        options: dict | None = None,
-    ) -> str:
-        """旧版接口（返回纯文本）。保留是为了不破坏已有调用方。
-
-        新代码请用 `text_generate` / `vision_analyze`，它们会返回带
-        provider / model / usage 的结构化结果。
-        """
-        temperature = (options or {}).get("temperature")
-        max_tokens = (options or {}).get("num_predict")
-        if images:
-            return self.vision_analyze(
-                prompt, images,
-                provider=provider, json_mode=json_mode,
-                temperature=temperature, max_tokens=max_tokens,
-            ).text
-        return self.text_generate(
-            prompt,
-            provider=provider, json_mode=json_mode,
-            temperature=temperature, max_tokens=max_tokens,
-        ).text
+        chosen = self.provider(capability=AICapability.EMBEDDING)
+        return chosen.embedding(EmbeddingRequest(texts=[str(t) for t in items]))
 
 
 def build_ai_service(config: Any, logger: Any = None, secrets: Any = None) -> AIService:
-    """按配置装配 AI 服务。
+    """按配置装配 AI 服务。**显式两个分支，没有注册表。**
 
-    遍历注册表里的工厂：每个工厂拿到自己的配置段与全局模型名，
-    自己决定"这轮要不要出现"（返回 None 就是跳过）。
+    配置形状：
 
-    加一个厂商 = 加一个工厂 + 登记一行；**本函数不需要改**。
+    ```json
+    {
+      "ai": {
+        "provider": "ollama",
+        "model": "",
+        "embedding_model": "",
+        "options": {},
+        "ollama": { "url": "http://127.0.0.1:11434" },
+        "openai_compatible": { "base_url": "", "api_key_secret": "" }
+      }
+    }
+    ```
+
+    任一环节不成立都会得到一个**能说清原因**的服务，而不是静默的空服务。
     """
-    service = AIService(logger=logger)
-    provider_name = str(config.get("ai.provider", "ollama") or "ollama")
-    global_model = str(config.get("ai.model", "") or "")
-    global_embedding_model = str(config.get("ai.embedding_model", "") or "")
+    provider_name = str(config.get("ai.provider", "") or "").strip()
+    model = str(config.get("ai.model", "") or "").strip()
+    embedding_model = str(config.get("ai.embedding_model", "") or "").strip()
+    options = dict(config.get("ai.options", {}) or {})
+    timeout = int(options.get("timeout", 0) or 0)
 
-    for name, factory in provider_factories().items():
-        settings = ProviderSettings(
-            name=name,
-            options=dict(config.get(f"ai.{name}", {}) or {}),
-            global_model=global_model,
-            global_embedding_model=global_embedding_model,
-            secrets=secrets,
+    if not provider_name:
+        return AIService(
             logger=logger,
-        )
-        try:
-            provider = factory(settings)
-        except Exception as exc:  # noqa: BLE001 - 一个 Provider 装配失败不该拖垮内核
-            if logger is not None:
-                logger.error("Provider %s 装配失败，已跳过：%s", name, exc)
-            continue
-        if provider is None:
-            continue
-        service.register(provider, default=(name == provider_name))
-
-    if provider_name and provider_name not in service.providers() and logger is not None:
-        logger.warning(
-            "ai.provider 指定了 %r，但它没有注册成功（多半是没配置齐全）；"
-            "当前可用：%s",
-            provider_name, service.providers() or "（无）",
+            configuration_error=(
+                "未配置 AI Provider\n"
+                "原因：config.json 的 ai.provider 为空\n"
+                "检查建议：把 ai.provider 设为 ollama（本地）或 openai_compatible（API）。"
+            ),
         )
 
+    if provider_name not in KNOWN_PROVIDERS:
+        return AIService(
+            logger=logger,
+            configuration_error=(
+                f"ai.provider 配置有误\n"
+                f"原因：ai.provider = {provider_name!r}，内核未实现该 Provider\n"
+                f"检查建议：改为 {' 或 '.join(KNOWN_PROVIDERS)} 之一。"
+            ),
+        )
+
+    service = AIService(logger=logger)
+
+    if provider_name == "ollama":
+        ollama_cfg = dict(config.get("ai.ollama", {}) or {})
+        url = str(ollama_cfg.get("url", "") or "http://127.0.0.1:11434")
+        service.register(
+            OllamaProvider(
+                url=url,
+                model=model,
+                embedding_model=embedding_model,
+                timeout=timeout or 180,
+                options=options,
+                logger=logger,
+            ),
+            default=True,
+        )
+        return service
+
+    # openai_compatible
+    api_cfg = dict(config.get("ai.openai_compatible", {}) or {})
+    base = str(api_cfg.get("base_url", "") or "").strip()
+    if not base:
+        return AIService(
+            logger=logger,
+            configuration_error=(
+                "provider=openai_compatible 配置不完整\n"
+                "原因：未配置 ai.openai_compatible.base_url，不知道要连哪个服务\n"
+                "检查建议：填上服务基址（例如 https://api.deepseek.com/v1），"
+                "并在 secrets.json 里放好 API Key；或把 ai.provider 改回 ollama。"
+            ),
+        )
+
+    secret_name = str(api_cfg.get("api_key_secret", "") or "")
+    api_key = ""
+    if secrets is not None and secret_name:
+        api_key = secrets.get_secret(secret_name) or ""
+
+    service.register(
+        OpenAICompatibleProvider(
+            base_url_value=base,
+            model=model,
+            embedding_model=embedding_model,
+            api_key=api_key,
+            timeout=timeout or 120,
+            logger=logger,
+        ),
+        default=True,
+    )
     return service

@@ -1,34 +1,30 @@
-"""AI 能力层（Core Capability）—— TASK-007。
+"""AI 能力层（Core Capability）。
 
 插件通过 `ctx.ai` 使用；**业务插件不得直接调用模型**。
 
 | 模块 | 职责 |
 |---|---|
-| `types.py` | 能力枚举、结果类型、错误类型 |
+| `types.py` | 能力枚举、结果类型（含向量的跨 Provider 约束）、错误类型 |
 | `request.py` | 请求结构（`TextRequest` / `VisionRequest` / `EmbeddingRequest`） |
-| `provider.py` | `ModelProvider` 抽象 + 共用 HTTP/图片工具 |
-| `registry.py` | Provider 注册表（加厂商不必改内核别处） |
-| `providers/` | 内置实现：`ollama` / `openai_compatible` |
-| `service.py` | `AIService` 门面 + 按配置装配的工厂 |
+| `provider.py` | `ModelProvider` 抽象 + 视觉结果解析 + HTTP / 图片 / 代理工具 |
+| `providers/` | 两个真实实现：`ollama`（本地）、`openai_compatible` |
+| `service.py` | `AIService` 门面 + 显式装配 |
+
+**没有注册表，没有"为将来预留"的接口。** 加第三个厂商 = 在 `providers/` 加一个模块
++ 在 `service.py` 的装配分支里加一段，**不改任何插件**。
 """
 
 from .provider import (
-    AIProvider,
     ModelProvider,
     base_url,
     encode_image,
     image_data_url,
+    parse_vision_payload,
     request_json,
 )
 from .providers import OllamaProvider, OpenAICompatibleProvider
-from .registry import (
-    ProviderSettings,
-    provider_factories,
-    register_provider_factory,
-    unregister_provider_factory,
-)
 from .request import EmbeddingRequest, TextRequest, VisionRequest
-from .service import AIService, build_ai_service
+from .service import KNOWN_PROVIDERS, AIService, build_ai_service
 from .types import (
     AICapability,
     AIError,
@@ -37,31 +33,30 @@ from .types import (
     AIUnsupported,
     EmbeddingResult,
     TextResult,
+    VisionResult,
 )
 
 __all__ = [
+    "AICapability",
     "AIError",
-    "AIProvider",
     "AIResponseError",
     "AIService",
     "AIUnavailable",
     "AIUnsupported",
-    "AICapability",
     "EmbeddingRequest",
     "EmbeddingResult",
+    "KNOWN_PROVIDERS",
     "ModelProvider",
     "OllamaProvider",
     "OpenAICompatibleProvider",
-    "ProviderSettings",
     "TextRequest",
     "TextResult",
     "VisionRequest",
+    "VisionResult",
     "base_url",
     "build_ai_service",
     "encode_image",
     "image_data_url",
-    "provider_factories",
-    "register_provider_factory",
+    "parse_vision_payload",
     "request_json",
-    "unregister_provider_factory",
 ]
