@@ -1,11 +1,11 @@
 {
   "id": "video_analyzer",
   "name": "视频分析器",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "spec_version": "1.0",
   "api_version": "1.0",
   "entry": "plugin.py:VideoAnalyzerPlugin",
-  "description": "本地视频素材资产库：FFmpeg 读取媒体信息、切分镜头、抽取关键帧，经 AI 能力层打标签与向量化，支持增量入库、标签检索、语义检索与片段导出。插件不直接接触模型。",
+  "description": "本地视频素材资产库 + 文案匹配：FFmpeg 读取媒体信息、切分镜头、抽取关键帧，经 AI 能力层打标签与向量化；支持增量入库、标签检索、中文 CLIP 图片检索、片段导出，以及「输入文案 → 每段推荐 Top-N 候选镜头」。插件不直接接触模型。",
   "author": "夏半仓",
   "capabilities": ["files", "ffmpeg", "settings", "ai"],
   "tools": [
@@ -73,6 +73,26 @@
       "name": "library_export",
       "description": "把选中的镜头导出成可再剪辑的视频片段（H.264/MP4，时间码精确）",
       "risk": "write"
+    },
+    {
+      "name": "script_match",
+      "description": "输入一段文案，自动分段并为每段推荐 Top-N 候选镜头；结果落盘，可用 match_show / match_select / match_reorder 人工调整",
+      "risk": "read"
+    },
+    {
+      "name": "match_show",
+      "description": "查看匹配结果（含每段选中的镜头与候选顺序）；不传 name 则列出已有结果",
+      "risk": "read"
+    },
+    {
+      "name": "match_select",
+      "description": "指定某一段用哪个镜头（替换候选 / 手动指定），改动存盘",
+      "risk": "read"
+    },
+    {
+      "name": "match_reorder",
+      "description": "把某一段里的一个候选上移 / 下移一位（调整顺序），改动存盘",
+      "risk": "read"
     }
   ],
   "config_schema": {
@@ -111,6 +131,27 @@
         "type": "integer",
         "default": 480,
         "minimum": 64
+      },
+      "match_top_n": {
+        "type": "integer",
+        "default": 3,
+        "minimum": 1,
+        "maximum": 20,
+        "description": "每段文案给几个候选镜头。默认 3（验收下限）；再多会稀释「帮你选好了几个」的体验。"
+      },
+      "match_max_chars": {
+        "type": "integer",
+        "default": 32,
+        "minimum": 4,
+        "maximum": 200,
+        "description": "单段字数上限。中文 CLIP 文本塔 context_length=52（去掉 [CLS]/[SEP] 剩 50 token），32 字留出余量避免静默截断。"
+      },
+      "match_min_chars": {
+        "type": "integer",
+        "default": 6,
+        "minimum": 0,
+        "maximum": 50,
+        "description": "单段字数下限，低于此长度的片段并入邻段 —— 单独一段没有画面语义，检索只会产生噪声。"
       }
     }
   }

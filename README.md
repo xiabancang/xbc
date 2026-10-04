@@ -1,4 +1,4 @@
-﻿# 夏半仓工具箱（XBC）
+# 夏半仓工具箱（XBC）
 
 一个**可插件化**的 Windows 本地工具平台内核。
 
@@ -59,7 +59,7 @@ XBC/
 │  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + ctx.ai 画面理解 + 素材资产库
 │  ├─ ai_test_plugin/        AI 能力层验收插件
 │  ├─ knowledge_base/        本地文档知识库（非本项目产物，未纳入版本管理）
-├─ tests/                    378 项测试
+├─ tests/                    423 项测试
 ├─ scripts/                  一次性运维脚本（如导出中文 CLIP 的 ONNX）
 └─ docs/                     技术方案、测试报告、调研报告
 ```
@@ -112,7 +112,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 378 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 423 tests / OK
 ```
 
 ---
@@ -339,7 +339,7 @@ python -m venv .venv
 |---|---|---|
 | `hello_xbc` | 机制验证（生命周期、能力、错误隔离） | `hello_probe` / `hello_greet` / `hello_fail` |
 | `text_toolbox` | 真实业务：纯本地文本处理 | `text_defaults` / `text_stats` / `text_dedupe` / `text_export` |
-| `video_analyzer` | 业务：视频结构分析 + 画面理解 + 素材资产库 | `video_*`（5 个）/ `library_*`（8 个） |
+| `video_analyzer` | 业务：视频结构分析 + 画面理解 + 素材资产库 + 文案匹配 | `video_*`（5 个）/ `library_*`（8 个）/ `script_match` + `match_*`（4 个） |
 | `ai_test_plugin` | 验收 AI 能力层：只通过 `ctx.ai` 说话 | `ai_selftest` |
 
 ### video_analyzer
@@ -417,14 +417,43 @@ python scripts/export_chinese_clip_onnx.py --out "$env:LOCALAPPDATA\夏半仓工
 python run.py tool call library_status   # 看 image_embedding 字段确认就绪
 ```
 
-报告：[《TASK-010 交付报告》](docs/task-010-retrieval-quality-report.md) ·
+报告：[《TASK-011 交付报告》](docs/task-011-script-match-report.md) ·
+[《TASK-010 交付报告》](docs/task-010-retrieval-quality-report.md) ·
 [《TASK-009 交付报告》](docs/task-009-video-library-v1-report.md)
 
 > **Windows 提示**：PowerShell 会把 `--kwargs` 里的双引号吃掉。请用上面的反引号转义写法，
 > 或 `cmd /c "python run.py ... --kwargs \"{...}\""`。
 
 可配置项（用户层配置 `config/plugins.json`）：`scene_threshold`、`min_shot_seconds`、
-`keyframes_per_shot`、`annotate_frames_per_shot`、`max_shots`、`frame_width`。
+`keyframes_per_shot`、`annotate_frames_per_shot`、`max_shots`、`frame_width`、
+`match_top_n`、`match_max_chars`、`match_min_chars`。
+
+### 文案 → 镜头匹配
+
+输入一段文案，自动分段并为**每段推荐 Top-N 候选镜头**（作为后续配音 / 音画同步 / 合成的输入）。
+
+```powershell
+# 分段 + 匹配 + 落盘（默认每段 3 个候选）
+python run.py tool call script_match --kwargs "{`"name`": `"宣传片-第一版`", `"script`": `"夜幕降临，城市华灯初上。车流像发光的河。`"}"
+
+# 查看 / 换镜头 / 调顺序（改动存进同一份 JSON）
+python run.py tool call match_show   --kwargs "{`"name`": `"宣传片-第一版`"}"
+python run.py tool call match_select --kwargs "{`"name`": `"宣传片-第一版`", `"segment_index`": 0, `"shot_id`": 7}"
+python run.py tool call match_reorder --kwargs "{`"name`": `"宣传片-第一版`", `"segment_index`": 0, `"shot_id`": 7, `"direction`": `"up`"}"
+```
+
+**V1 只推荐，不替人决定**：每段默认选中 top-1，但那是默认值不是决定 ——
+人可以换成库里任意镜头、调候选顺序，结果存盘后重新读取仍在。
+
+分段规则：句末标点一级（**作者写的短句原样保留**），超过 32 字按句内标点再切，
+我们自己切出的短碎片并入邻片。32 字 = 中文 CLIP 的 50 token 上限留余量。
+
+**实测（16 画面语料）**：top-1 命中 **8/9**。
+唯一失手是"整个画面是纯黑的"—— 纯黑画面在 CLIP 空间里与纯白余弦高达 **0.9990**，
+属模型能力边界，见[报告](docs/task-011-script-match-report.md) §4。
+
+> ⚠️ 评测语料是**合成图案**，不是真实素材。8/9 **不能外推到真实视频** ——
+> 真实素材应当在下一轮重测。
 
 ---
 

@@ -50,6 +50,23 @@ from xbc.core.contract.plugin import XbcPlugin
 # 模块名带 xbc_va_ 前缀，避免与其他插件撞名（插件共享同一个 sys.modules）
 from xbc_va_clip import ChineseClipProvider
 from xbc_va_library import Library, LibraryError, cosine  # noqa: E402
+from xbc_va_match import (  # noqa: E402
+    DEFAULT_MAX_CHARS as MATCH_DEFAULT_MAX_CHARS,
+)
+from xbc_va_match import (
+    DEFAULT_MIN_CHARS as MATCH_DEFAULT_MIN_CHARS,
+)
+from xbc_va_match import (
+    MatchError,
+    MatchStore,
+    reorder_candidate,
+    segment_script,
+    select_shot,
+)
+
+#: 每段默认给几个候选。3 是验收下限（"每段至少 3 个候选"），
+#: 再多会稀释"帮你选好了几个"的体验 —— 人是在**少数几个**里挑，不是翻长列表。
+DEFAULT_MATCH_TOP_N = 3
 
 #: 从 ffmpeg showinfo 输出里取时间戳（V18 同款正则）
 _SCENE_TIME_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
@@ -414,12 +431,72 @@ class VideoAnalyzerPlugin(XbcPlugin):
             risk="write",
         )
 
+        # ---------------- 文案 → 镜头匹配（TASK-011） ----------------
+        ctx.tools.register(
+            "script_match", self.script_match,
+            description=(
+                "输入一段文案，自动分段并为每段推荐 Top-N 候选镜头；"
+                "结果落盘，可用 match_show / match_select / match_reorder 人工调整"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "script": {"type": "string", "minLength": 1},
+                    "top_n": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "space": {"type": "string", "enum": ["auto", "image", "text"]},
+                    "max_chars": {"type": "integer", "minimum": 4, "maximum": 200},
+                    "min_chars": {"type": "integer", "minimum": 0, "maximum": 50},
+                },
+                "required": ["name", "script"],
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "match_show", self.match_show,
+            description="查看匹配结果（含每段选中的镜头与候选顺序）；不传 name 则列出已有结果",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "match_select", self.match_select,
+            description="指定某一段用哪个镜头（替换候选 / 手动指定），改动存盘",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "segment_index": {"type": "integer", "minimum": 0},
+                    "shot_id": {"type": "integer", "minimum": 1},
+                },
+                "required": ["name", "segment_index", "shot_id"],
+            },
+            output_schema=object_output, risk="read",
+        )
+        ctx.tools.register(
+            "match_reorder", self.match_reorder,
+            description="把某一段里的一个候选上移 / 下移一位（调整顺序），改动存盘",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "segment_index": {"type": "integer", "minimum": 0},
+                    "shot_id": {"type": "integer", "minimum": 1},
+                    "direction": {"type": "string", "enum": ["up", "down"]},
+                },
+                "required": ["name", "segment_index", "shot_id"],
+            },
+            output_schema=object_output, risk="read",
+        )
+
         if not ctx.ffmpeg.available():
             self.log.warning(
                 "未检测到 FFmpeg：video_analyzer 的工具会在调用时明确报错，"
                 "请安装 FFmpeg 或配置 ffmpeg.ffmpeg_path"
             )
-        self.log.info("apply：已注册 13 个视频工具 + chinese_clip Provider，配置 = %s", self._cfg)
+        self.log.info("apply：已注册 17 个视频工具 + chinese_clip Provider，配置 = %s", self._cfg)
 
     # ---------------- 工具实现 ----------------
     def video_probe(self, path: str) -> dict[str, Any]:
@@ -1063,38 +1140,82 @@ class VideoAnalyzerPlugin(XbcPlugin):
         **不做多路融合**：TASK-010 实测等权 RRF 会把 top-1 从 10/10 拉到 8/10
         （图片路已满分、文本路只 2/10，等权融合纯拖后腿），所以走单路。
         """
+        context = self._retrieval_context(space)
+        if "error" in context:
+            return {
+                "query": query, "mode": "semantic", "count": 0, "results": [],
+                "spaces": context.get("available", []), "note": context["error"],
+            }
+
+        scored = self._score_query(context, query, limit)
+        return {
+            "query": query, "mode": "semantic", "space": space,
+            "count": len(scored["results"]),
+            "embedding": scored["embedding"],
+            "spaces_available": context["available"],
+            "candidates": len(context["stored"]),
+            "skipped_other_space": scored["skipped_other_space"],
+            "results": scored["results"],
+        }
+
+    # ---------------- 检索的唯一实现（检索工具与文案匹配共用） ----------------
+    def _retrieval_context(self, space: str) -> dict[str, Any]:
+        """检索的**准备阶段**：解析向量空间 → 取镜头向量 → 解析该空间的 Provider。
+
+        **准备阶段只做一次，可以服务多次打分** —— 文案匹配有 N 段文案，
+        但向量空间与镜头向量对整批文案是同一份，不该每段重读一次库。
+
+        不可用时返回带 `error` 的字典，由调用方决定怎么呈现（检索返回空结果、
+        匹配则整批失败）。
+        """
         library = self._library()
         available = self._library_spaces()
         if not available:
-            return {
-                "query": query, "mode": "semantic", "count": 0, "results": [],
-                "note": "库里还没有向量：先跑 library_scan 入库",
-            }
+            return {"error": "库里还没有向量：先跑 library_scan 入库", "available": []}
 
         chosen = self._pick_space(available, space)
         if chosen is None:
             return {
-                "query": query, "mode": "semantic", "count": 0, "results": [],
-                "spaces": available,
-                "note": f"库里没有 {space!r} 空间的向量；现有空间：{available}",
+                "error": f"库里没有 {space!r} 空间的向量；现有空间：{available}",
+                "available": available,
             }
 
-        stored = library.shot_vectors(
-            provider=chosen["provider"], model=chosen["model"]
-        )
+        stored = library.shot_vectors(provider=chosen["provider"], model=chosen["model"])
         if not stored:
             return {
-                "query": query, "mode": "semantic", "count": 0, "results": [],
-                "spaces": available,
-                "note": f"空间 {chosen['provider']}/{chosen['model']} 里没有镜头级向量",
+                "error": f"空间 {chosen['provider']}/{chosen['model']} 里没有镜头级向量",
+                "available": available,
             }
 
-        # **用该空间自己的 Provider 编码查询** —— 中文 CLIP 的查询文本必须由
-        # 中文 CLIP 的文本塔编码，才能和它的图片向量落在同一个向量空间。
-        owner = self.ctx.ai.provider(
-            chosen["provider"], capability=AICapability.EMBEDDING
-        )
-        embedded = owner.embedding(EmbeddingRequest(texts=[query]))
+        try:
+            owner = self.ctx.ai.provider(
+                chosen["provider"], capability=AICapability.EMBEDDING
+            )
+        except AIError as exc:
+            return {
+                "error": f"空间 {chosen['provider']}/{chosen['model']} 没有可用的 Provider：{exc}",
+                "available": available,
+            }
+
+        return {
+            "library": library, "chosen": chosen, "stored": stored,
+            "owner": owner, "available": available,
+        }
+
+    @staticmethod
+    def _score_query(
+        context: dict[str, Any], query: str, limit: int
+    ) -> dict[str, Any]:
+        """检索的**唯一打分实现**：编码查询 → 同空间过滤 → 余弦排序 → 带标签返回。
+
+        **这段代码只有一份。** `library_search_semantic`（检索工具）与
+        `script_match`（文案匹配）都调它 —— 匹配不重新实现任何检索逻辑。
+        """
+        chosen = context["chosen"]
+        stored = context["stored"]
+
+        # 查询必须由**该空间自己的 Provider** 编码，才能和库里的向量同空间
+        embedded = context["owner"].embedding(EmbeddingRequest(texts=[query]))
         query_vector = embedded.vectors[0]
 
         usable = [
@@ -1108,17 +1229,15 @@ class VideoAnalyzerPlugin(XbcPlugin):
              for item in usable),
             key=lambda row: row["score"], reverse=True,
         )[: max(1, int(limit))]
-        labels = library.shot_labels([row["shot_id"] for row in scored])
+        labels = context["library"].shot_labels([row["shot_id"] for row in scored])
 
         return {
-            "query": query, "mode": "semantic", "space": space,
-            "count": len(scored),
             "embedding": {
                 "provider": embedded.provider, "model": embedded.model,
                 "dim": len(query_vector),
             },
-            "spaces_available": available,
-            "candidates": len(stored), "skipped_other_space": skipped,
+            "space": {"provider": chosen["provider"], "model": chosen["model"]},
+            "skipped_other_space": skipped,
             "results": [
                 {
                     "score": row["score"],
@@ -1144,6 +1263,182 @@ class VideoAnalyzerPlugin(XbcPlugin):
             next((s for s in spaces if s["modality"] == "image"), None)
             or spaces[0]
         )
+
+    # ---------------- 文案 → 镜头匹配 ----------------
+    def _match_store(self) -> MatchStore:
+        return MatchStore(self.ctx.data_dir)
+
+    def script_match(
+        self,
+        name: str,
+        script: str,
+        top_n: int | None = None,
+        space: str = "auto",
+        max_chars: int | None = None,
+        min_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """把一段文案切成段，每段推荐 **Top-N 候选镜头**，结果落盘可人工调整。
+
+        ## V1 只推荐，不替人决定
+
+        返回的每段都带 `candidates`（按相似度降序）与 `selected_shot_id`，
+        默认选中 top-1 —— **但那是"默认"，不是"决定"**：人可以用
+        `match_select` 换成任意镜头、用 `match_reorder` 调顺序。
+
+        ## 复用了什么
+
+        分段与存取在 `xbc_va_match`；**检索一行都没有重写** ——
+        每段都调 TASK-010 的 `_score_query`（与 `library_search_semantic` 同一份实现）。
+        准备阶段 `_retrieval_context` **只做一次**：向量空间与镜头向量对整批文案是同一份。
+        """
+        store = self._match_store()
+        store.validate_name(name)
+
+        segments = segment_script(
+            script,
+            max_chars=int(
+                max_chars or self._number(None, "match_max_chars", MATCH_DEFAULT_MAX_CHARS)
+            ),
+            min_chars=int(
+                min_chars or self._number(None, "match_min_chars", MATCH_DEFAULT_MIN_CHARS)
+            ),
+        )
+        if not segments:
+            raise ValueError("文案为空或全是空白，没有可匹配的段")
+
+        count = int(top_n or self._number(None, "match_top_n", DEFAULT_MATCH_TOP_N))
+        count = max(1, min(20, count))
+
+        context = self._retrieval_context(space)
+        if "error" in context:
+            raise ValueError(f"无法匹配：{context['error']}")
+
+        matched: list[dict[str, Any]] = []
+        for index, text in enumerate(segments):
+            scored = self._score_query(context, text, count)
+            candidates = scored["results"]
+            matched.append({
+                "index": index,
+                "text": text,
+                "selected_shot_id": candidates[0]["shot_id"] if candidates else None,
+                "candidates": candidates,
+            })
+
+        chosen = context["chosen"]
+        payload: dict[str, Any] = {
+            "version": 1,
+            "name": name,
+            "script": script,
+            "top_n": count,
+            "space": {
+                "provider": chosen["provider"], "model": chosen["model"],
+                "dim": chosen["dim"], "modality": chosen.get("modality", ""),
+            },
+            "library_shots": len(context["stored"]),
+            "segments": matched,
+        }
+        path = store.save(payload)
+        self.log.info("文案匹配完成：%s（%d 段 × %d 候选）", name, len(matched), count)
+
+        return {
+            "name": payload["name"],
+            "path": str(path),
+            "script_chars": len(script),
+            "segments": len(matched),
+            "top_n": count,
+            "space": payload["space"],
+            "library_shots": payload["library_shots"],
+            "results": matched,
+            "hint": (
+                "每段默认选中 top-1；用 match_select 换成别的镜头、"
+                "match_reorder 调候选顺序，改动会存进同一份 JSON。"
+            ),
+        }
+
+    def match_show(self, name: str | None = None) -> dict[str, Any]:
+        """查看匹配结果。不传 `name` 就列出已有的。
+
+        **选中的镜头与候选顺序都如实回显** —— 人能看到自己上次改了什么。
+        """
+        store = self._match_store()
+        if not name:
+            return {"count": len(items := store.listing()), "matches": items}
+
+        payload = store.load(name)
+        segments = payload.get("segments", [])
+        return {
+            "name": payload.get("name", name),
+            "path": str(store.path(name)),
+            "script": payload.get("script", ""),
+            "top_n": payload.get("top_n"),
+            "space": payload.get("space", {}),
+            "library_shots": payload.get("library_shots"),
+            "created_at": payload.get("created_at", ""),
+            "updated_at": payload.get("updated_at", ""),
+            "segments": [
+                {
+                    "index": segment.get("index"),
+                    "text": segment.get("text", ""),
+                    "selected_shot_id": segment.get("selected_shot_id"),
+                    "candidates": segment.get("candidates", []),
+                }
+                for segment in segments
+            ],
+        }
+
+    def match_select(
+        self, name: str, segment_index: int, shot_id: int
+    ) -> dict[str, Any]:
+        """指定某一段用哪个镜头（"替换候选 / 手动指定"都走这一步）。
+
+        - 镜头已在该段候选里 → 直接选中它
+        - 不在候选里 → 从素材库取它的信息，插到候选**首位**并选中
+        """
+        store = self._match_store()
+        payload = store.load(name)
+        shot: dict[str, Any] | None = None
+        if not any(
+            int(c.get("shot_id", -1)) == int(shot_id)
+            for segment in payload.get("segments", [])
+            for c in segment.get("candidates", [])
+        ):
+            shot = self._library().shot(int(shot_id))
+            if shot is None:
+                raise ValueError(f"素材库里没有这个镜头：shot_id={shot_id}")
+        segment = select_shot(
+            payload, segment_index=int(segment_index), shot_id=int(shot_id), shot=shot
+        )
+        path = store.save(payload)
+        return {
+            "name": payload.get("name", name), "path": str(path),
+            "segment": {
+                "index": segment.get("index"),
+                "text": segment.get("text", ""),
+                "selected_shot_id": segment.get("selected_shot_id"),
+                "candidates": segment.get("candidates", []),
+            },
+        }
+
+    def match_reorder(
+        self, name: str, segment_index: int, shot_id: int, direction: str = "up"
+    ) -> dict[str, Any]:
+        """把某段里的一个候选上移 / 下移一位（调整顺序）。"""
+        store = self._match_store()
+        payload = store.load(name)
+        segment = reorder_candidate(
+            payload, segment_index=int(segment_index),
+            shot_id=int(shot_id), direction=str(direction),
+        )
+        path = store.save(payload)
+        return {
+            "name": payload.get("name", name), "path": str(path),
+            "segment": {
+                "index": segment.get("index"),
+                "text": segment.get("text", ""),
+                "selected_shot_id": segment.get("selected_shot_id"),
+                "candidates": segment.get("candidates", []),
+            },
+        }
 
     # ---------------- 素材库：导出 ----------------
     def library_export(self, shot_id: int, output: str | None = None) -> dict[str, Any]:
