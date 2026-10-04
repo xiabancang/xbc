@@ -124,13 +124,14 @@ icacls .venv /setintegritylevel '(OI)(CI)M' /T /C
 - **pluggy**：读源码（`_manager.py` / `_hooks.py` / `_execution.py` / `_decorators.py`），提炼 hookspec/hookimpl 契约分离、注册时签名校验、`optionalhook`、`set_blocked`。
 - **uTools**：委派子代理调研官方开发者文档与官方 JSONSchema，报告见 [docs/research/utools-plugin-mechanism.md](docs/research/utools-plugin-mechanism.md)。
 - **Dify Plugin**：委派子代理核对官方文档与 GitHub 源码（manifest 字段、daemon 架构、协议、凭证链路）。
-- **MCP**：委派子代理抓取官方规范原文（2025-06-18 与更晚修订版，含 schema 与 SEP），原始材料在 `mcp-research/`（未入库）。
+- **MCP**：委派子代理抓取官方规范原文（覆盖 `2024-11-05` 至当前 `2026-07-28`，含两份 schema.ts 与 SEP-1024）。报告：[docs/research/mcp-spec-facts.md](docs/research/mcp-spec-facts.md)；原始材料在 `mcp-research/`（未入库）。
 
-**调研纠正了 3 处原有判断**（已写入方案）：
+**调研纠正了 4 处原有判断**（已写入方案）：
 
 1. uTools **并非"能力对用户可见"** —— 它没有任何声明式权限清单，是"安装即全权"。原判断有误，已改为反面教材。
 2. Dify 的 daemon **不支持 Windows**（其 README 明确）—— 这直接印证我们不该照搬进程外架构。
 3. Dify 的凭证是**加密存储但明文下发**给插件 —— 这被记为"可做得更好的地方"，而非可学范式。
+4. MCP **当前规范版本是 `2026-07-28`，不是 `2025-06-18`**：该版本**删除了 `initialize` 握手、session 与 `ping`**，改为完全无状态。我最初按旧版写法描述"握手协商能力"，已更正。同时 `annotations` 的语义被我写反了 —— 它只是**提示**，规范明确要求**不可信来源的 annotations 不得作为决策依据**。这条推论已写进安全底线：**插件自报的风险等级同样不可信，约束必须由内核在执行点强制**。
 
 ---
 

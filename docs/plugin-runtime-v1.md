@@ -131,18 +131,19 @@ Dify 是云端 LLM 平台，插件体系是五个参考里**工程化最重**的
 
 ### 1.5 MCP —— 工具描述与安装安全的标准化范本
 
-MCP 的价值在于它把"给模型用的工具"标准化了，并且**专门为"本地宿主 + 本地服务"写过安全要求**（SEP-1024）—— 这与我们的场景高度重合。我们直接核对了官方规范原文（含 `2025-06-18` 与更晚的 `2026-07-28` 修订版及 schema）：
+MCP 的价值在于它把"给模型用的工具"标准化了，并且**专门为"本地宿主 + 本地服务"写过安全要求**（SEP-1024）—— 这与我们的场景高度重合。我们直接核对了官方规范原文与权威 schema，覆盖 `2025-06-18` 到当前 `2026-07-28` 的多个修订版：
 
 | 机制（已核实） | 内容 | 我们的用法 |
 |---|---|---|
-| **生命周期与能力表达（正在演进）** | 早期版本（`2025-11-25` 及更早）用 **`initialize` 握手**协商协议版本与双方能力；**`2026-07-28` 起改为"按请求携带能力元数据"，`initialize` 退化为 legacy 兼容路径**（并为旧客户端保留回退） | 两点启发：① 能力协商是必要的；② 但把它做成**一次性有状态握手**会带来耦合，MCP 自己在往无状态走。我们本地进程内激活只协商一次是合理的，但**能力清单必须随时可查**，不能只存在于握手那一刻 |
+| **生命周期：握手已被删除** | 修订史 `2024-11-05 → 2025-03-26 → 2025-06-18 → 2025-11-25 → 2026-07-28（当前）`。早期版本（≤2025-11-25）用 `initialize` 握手 + session 协商版本与能力；**当前版本直接删除了 `initialize`、session 与 `ping`** —— 改为每个请求在 `_meta` 中携带 `protocolVersion` 与 `clientCapabilities`，并新增**强制 RPC `server/discover`** 公布服务端 `supportedVersions` / `capabilities` | 两点启发：① 能力协商是必要的；② 但**一次性有状态握手是负债**，MCP 花两轮修订把它删掉了。我们本地进程内只在激活时协商一次是合理的，但**能力清单必须随时可查**，不能只存在于激活那一刻 |
 | **三大原语** | `tools`（可执行动作）、`resources`（只读数据）、`prompts`（提示模板） | 对应我们的 Tool / Resource / Skill |
-| **工具描述** | `name` + `description` + **`inputSchema`**（入参 JSON Schema）+ **`outputSchema`**（出参 Schema，可选）+ **`annotations`**（只读/破坏性等行为提示）；结构化结果走 `structuredContent` | 我们的 Tool 注册必须带 schema 与风险标注。规范明确要求**客户端必须把 annotations 当作安全提示对待** —— 与我们的 `risk` 字段同义 |
-| **按需列举与错误语义** | `tools/list` 发现、`tools/call` 调用；工具自身失败通过结果里的 **`isError: true`** 表达（而不是协议错误） | 与"skill 目录 + 按需加载"同构。"业务失败"与"协议失败"要分开表达 |
-| **⚠️ 本地安装必须显式同意** | **SEP-1024**（Final，Standards Track）：本地服务的"一键安装"不得静默执行命令，**必须让用户看到将要执行的完整命令并明确同意** | **直接写进我们的安全底线**：插件安装/更新绝不静默执行脚本；要展示命令与权限并取得同意 |
-| **安全边界** | 官方强调用户同意、信任边界、以及工具描述可能被注入的风险 | 工具标风险等级；来自外部的描述需经用户确认 |
+| **工具描述** | `name` + `description` + **`inputSchema`**（根必须是 `type:"object"`）+ **`outputSchema`** + **`annotations`**（`readOnlyHint` 默认 false、`destructiveHint` **默认 true**、`idempotentHint`、`openWorldHint`）；结构化结果走 `structuredContent` | 与我们的 Tool 注册同构。**这里有一处关键更正**：annotations 只是**提示**，规范明确要求把不可信来源的 annotations 视为**不可作为安全决策依据**。推论：我们的 `risk` 字段同样**不可信**，真正的约束必须由内核在**执行点**强制（见 3.10 的 S1/S2） |
+| **按需列举与错误二分** | `tools/list`（cursor 分页 + 缓存元数据）与 `tools/call`；**协议错误**（工具不存在、请求不合 schema）走 JSON-RPC 错误码，**工具自身失败**走结果内 `isError: true`，让模型能够自纠 | 与"skill 目录 + 按需加载"同构。**"业务失败"与"协议失败"必须分开表达** —— 这条直接进我们的 Tool 契约 |
+| **弃用机制** | Roots / Sampling / Logging / HTTP+SSE / 动态客户端注册均已弃用，**弃用期 ≥12 个月**才可能移除；目前尚无已移除项 | 我们的 API 契约要给出同样的承诺：**弃用不等于删除，且必须留足迁移期**（对应 3.9 的兼容规则） |
+| **⚠️ 本地安装必须显式同意** | **SEP-1024**（Final，Standards Track）：本地服务的"一键安装"不得静默执行命令，**必须不截断地展示将要执行的完整命令并取得明确同意** | **直接写进我们的安全底线 S3** |
+| **安全边界** | 官方最佳实践覆盖 confused deputy、token passthrough、SSRF、本地服务被攻陷、工具描述注入等；核心要求是 **Host 必须取得用户明确同意才能外传数据或调用工具**，且**工具即任意代码执行** | 与我们 3.10 的五条底线一致；工具与插件都必须标风险并经用户同意 |
 
-**取舍**：V1 不引入网络传输层（我们本地进程内），但**采用它的工具描述形态、能力协商思想与安装同意原则**；并把 MCP 定位为**将来的"进程外插件"通道**，用于接入外部工具生态。
+**取舍**：V1 不引入网络传输层（我们本地进程内），但**采用它的工具描述形态、能力协商思想、错误二分与安装同意原则**；并把 MCP 定位为**将来的"进程外插件"通道**，用于接入外部工具生态。
 
 **取舍**：V1 不引入网络传输层（我们本地进程内），但**采用它的工具描述形态、能力协商思想与安装同意原则**；并把 MCP 定位为**将来的"进程外插件"通道**，用于接入外部工具生态。
 
@@ -427,8 +428,8 @@ class MediaAnalyzerPlugin(XbcPlugin):
 | # | 底线 | 来源教训 |
 |---|---|---|
 | S1 | **能力声明 → 执行点校验**。manifest 没声明的能力，在调用点直接拒绝（已实现 `CapabilityDenied`）。 | uTools 没有任何权限清单，等于安装即全权 |
-| S2 | **危险操作首次授权**。写文件、执行外部命令、访问网络等，首次使用向用户展示"谁、要做什么、影响什么"并取得同意；可撤销、可在管理页查看。 | Dify/MCP 都强调用户同意；uTools 缺这一层 |
-| S3 | **安装与更新绝不静默执行命令**。要展示将要执行的完整内容（脚本、依赖安装、网络请求）并取得显式同意。 | MCP SEP-1024（Final）：一键安装的静默命令执行是重大攻击面 |
+| S2 | **危险操作首次授权**。写文件、执行外部命令、访问网络等，首次使用向用户展示"谁、要做什么、影响什么"并取得同意；可撤销、可在管理页查看。**授权依据必须来自内核的实际调用点，绝不能依据插件自报的风险等级** —— 自述不可信。 | Dify/MCP 都强调用户同意；uTools 缺这一层；MCP 明确规定 annotations 只是 hint，**不可信来源的 annotations 不得作为决策依据** |
+| S3 | **安装与更新绝不静默执行命令**。要**不截断地**展示将要执行的完整内容（脚本、依赖安装、网络请求）并取得显式同意 —— 截断展示等于没展示。 | MCP SEP-1024（Final）：一键安装的静默命令执行是重大攻击面 |
 | S4 | **密钥由宿主代持**，插件不持有长期明文凭据；日志与错误信息强制脱敏。 | Dify 在 invoke 时把明文凭据下发插件，属已知弱点 |
 | S5 | **资源必须限额**：激活超时、单次调用超时、产物大小上限、插件数据目录配额。 | Dify 把限额量化（600s / 50MB / 5MB / 120s）；无限制则失控时无从下手 |
 
@@ -734,7 +735,9 @@ XBC/
 
 - **DeepSeek Harness**：其发行包 `app.asar` 内自带的插件开发指南 —— `cordis-plugin-development` 技能（SKILL.md + `references/host-plugin.md`、`practices.md`、`mcp-bundle.md`、`ui-plugin.md`、`verification.md`、`user-actions.md` + `templates/`）、`cordis-composition-reference` 技能、`dsh-skill` 与 `dsh-tool-skill` 包文档、`dsh-agent-preset` 的 skills 目录。
 - **pluggy** 源码：`src/pluggy/_manager.py`（`register` / `add_hookspecs` / `_verify_hook` / `check_pending` / `set_blocked` / `load_setuptools_entrypoints` / `subset_hook_caller`）、`_decorators.py`（`tryfirst` / `trylast` / `wrapper` / `hookwrapper` / `optionalhook` / `specname` / `firstresult` / `historic`）、`_execution.py`（`_multicall` 与 firstresult 中止语义）、`_hooks.py`、`_result.py`。本地副本：`F:\Downloads\xbc-refs\pluggy`。
-- **MCP** 官方规范原文与 schema（`2025-06-18` 与 `2026-07-28` 两版，含 lifecycle / transports / tools / resources / prompts / sampling / roots / elicitation / versioning / changelog、工具与协议 schema，以及 SEP-1024 与安全最佳实践）。本地材料目录：`mcp-research/`（未入库）。
+- **MCP** 官方规范原文与权威 schema —— 覆盖 `2024-11-05` 至当前 `2026-07-28` 的修订史，含 lifecycle / transports / tools / resources / prompts / elicitation / versioning / changelog / deprecated、两份 schema.ts，以及 **SEP-1024** 与安全最佳实践。规范页面抓取会被截断，故改用官方 `.md` 源与 GitHub 上的 `schema/2026-07-28/schema.ts` 逐字段核对。
+  - 汇总结论报告：[docs/research/mcp-spec-facts.md](research/mcp-spec-facts.md)
+  - 原始材料目录：`mcp-research/`（未入库）
 
 **委派调研（二手材料，已交叉核对字段）**
 
