@@ -100,15 +100,49 @@ icacls .venv /setintegritylevel '(OI)(CI)M' /T /C
 
 ---
 
+## TASK-002　设计夏半仓 Plugin Runtime V1 —— DONE
+
+**范围**：只做架构设计，不写业务代码；不设计商城 / 支付 / 云端 / 用户系统 / 多租户。
+
+**交付物**：[docs/plugin-runtime-v1.md](docs/plugin-runtime-v1.md) ——《夏半仓 Plugin Runtime 技术方案 V1》
+
+**验收对照**：
+
+| 要求 | 章节 | 状态 |
+|---|---|---|
+| Core 职责定义（做什么 / 禁止做什么） | 第 2 章（12 项职责 / 10 项禁止 / 3 条边界判定规则） | ✅ |
+| Plugin 接口设计（生命周期 / 注册 / 配置 / 通信） | 第 3 章（含 3.10 安全底线） | ✅ |
+| Skill / Agent / Plugin 关系 | 第 4 章（四层模型 + 调用链 + 调用策略矩阵 + 边界纪律） | ✅ |
+| 目录结构设计 | 第 5 章（源码 / 运行期数据 / 插件标准结构） | ✅ |
+| 第一阶段 MVP 范围 | 第 6 章（10 项必做 / 7 项不做 / 10 条可执行验收） | ✅ |
+| 研究 5 个参考 | 第 1 章 + 附录 A | ✅ |
+| 不设计商城 / 支付 / 云端 / 用户系统 / 多租户 | 2.2 N6/N8 + 6.3 | ✅ |
+
+**参考调研的原始材料**：
+
+- **DeepSeek Harness**：直接从发行版 `app.asar` 中抽出其自带的插件开发指南（`cordis-plugin-development` 技能 + 4 份 references、`cordis-composition-reference` 技能、`dsh-skill` / `dsh-tool-skill` 包文档）。**这是最深的一份参考** —— DSH 内核基于 Cordis 依赖注入插件框架。
+- **pluggy**：读源码（`_manager.py` / `_hooks.py` / `_execution.py` / `_decorators.py`），提炼 hookspec/hookimpl 契约分离、注册时签名校验、`optionalhook`、`set_blocked`。
+- **uTools**：委派子代理调研官方开发者文档与官方 JSONSchema，报告见 [docs/research/utools-plugin-mechanism.md](docs/research/utools-plugin-mechanism.md)。
+- **Dify Plugin**：委派子代理核对官方文档与 GitHub 源码（manifest 字段、daemon 架构、协议、凭证链路）。
+- **MCP**：委派子代理抓取官方规范原文（2025-06-18 与更晚修订版，含 schema 与 SEP），原始材料在 `mcp-research/`（未入库）。
+
+**调研纠正了 3 处原有判断**（已写入方案）：
+
+1. uTools **并非"能力对用户可见"** —— 它没有任何声明式权限清单，是"安装即全权"。原判断有误，已改为反面教材。
+2. Dify 的 daemon **不支持 Windows**（其 README 明确）—— 这直接印证我们不该照搬进程外架构。
+3. Dify 的凭证是**加密存储但明文下发**给插件 —— 这被记为"可做得更好的地方"，而非可学范式。
+
+---
+
 ## 待办（尚未开始）
 
 | ID | 任务 | 前置 | 备注 |
 |---|---|---|---|
-| TASK-002 | 首个真实业务插件：把 V18 的视频分析能力插件化 | TASK-001 | V18 仅作功能参考，禁止直接修改 |
-| TASK-003 | 打包分发（PyInstaller），非技术用户可双击运行 | TASK-002 | 注意：工作区内产物会带 Low 标签，需先处理 |
-| TASK-004 | 插件管理界面：安装 / 卸载 / 权限提示 | TASK-001 | 目前靠复制文件夹 |
-| TASK-005 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
-| TASK-006 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-003 | 当前阶段明确不做 |
+| TASK-003 | 实现 Plugin Runtime V1 MVP | TASK-002 | 按方案第 6 章 M1–M10；**需用户先确认两个开放问题**（见方案 7 章） |
+| TASK-004 | 首个真实业务插件 `media_analyzer` | TASK-003 | V18 仅作功能参考，禁止直接修改 |
+| TASK-005 | 打包分发（PyInstaller），非技术用户可双击运行 | TASK-004 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
+| TASK-006 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
+| TASK-007 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-005 | 当前阶段明确不做 |
 
 ---
 
