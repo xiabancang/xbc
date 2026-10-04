@@ -574,8 +574,8 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 
 | ID | 任务 | 前置 | 备注 |
 |---|---|---|---|
-| TASK-010 | 图形界面二期：插件安装/卸载入口 + 配置编辑 | TASK-006 | 安装器是纯数据操作，界面直接调 `create_installer()` |
-| TASK-011 | 文案 → 镜头匹配 | TASK-009 | 素材库已就位，检索能力可复用 |
+| TASK-010 | **文案 → 镜头匹配**（前置调研已完成） | TASK-009 | 素材库已就位；技术选型见 [video-semantic-retrieval-options.md](docs/research/video-semantic-retrieval-options.md) |
+| TASK-011 | 图形界面二期：插件安装/卸载入口 + 配置编辑 | TASK-006 | 安装器是纯数据操作，界面直接调 `create_installer()` |
 | TASK-012 | 打包分发（PyInstaller） | TASK-008 | 注意：工作区内产物带 Low 完整性标签，需先处理 |
 | TASK-013 | 数据层迁移机制 | 出现真实业务库时 | 现在做属于过度设计 |
 | TASK-014 | 平台化：账号、插件授权、插件商城、云端 AI 网关 | TASK-012 | 包格式、台账、AI 能力层均已就位 |
@@ -598,4 +598,5 @@ AI 能力层不得引入第三方依赖。**约束写进测试才守得住。**
 | 2026-10-05 | TASK-007 | AI Capability Layer V1（按规格对齐版）：`AIService` + `ModelProvider` + Request/Response 结构；`providers/`（ollama / openai_compatible）；`text_generate` / `vision_analyze`（结构化 description+labels）/ `embedding`（dim）；配置 `ai.provider`/`ai.model`/`ai.options`；验收插件 `ai_test_plugin`（单工具 `ai_selftest`）；**删除 Provider 注册表**（原则 6）；修 9 个真缺陷；测试增至 283 项；产出《AI Capability Layer V1 测试报告》 |
 | 2026-10-05 | TASK-008 | AI Capability 首次真实消费：`vision_analyze` 新增 `question`（向后兼容，返回 `VisionAnswer{answer,labels}`）；video_analyzer 新增 `video_annotate`（关键帧 → `ctx.ai` → 逐镜头标签）；Core 改动锁定（17 单元 + 37 文件哈希零变化）；修 2 个真缺陷（含 TASK-007 大小写敏感 grep 漏洞）；测试增至 305 项；产出《TASK-008 交付报告》含接口可用性反馈 |
 | 2026-10-05 | TASK-009 | 视频素材资产库 V1：插件内 SQLite（5 表）、内容哈希增量、失败隔离与重试、标签检索 + 语义检索、片段导出、整库重建；修 TASK-008 两处接口问题（Core 改动锁定 4 文件 / 37 文件零变化）；修 5 个真缺陷；测试增至 348 项；产出《TASK-009 交付报告》含真实使用反馈 |
-| 2026-10-05 | 待办调整 | TASK-009 编号被"视频素材资产库"占用，原界面二期顺延为 TASK-010，其后依序顺延 |
+| 2026-10-05 | 待办调整 | TASK-009 编号被"视频素材资产库"占用。**TASK-010 按 TASK-009 任务书原文保留给「文案 → 镜头匹配」**（任务书里明确写了"文案→镜头匹配是 TASK-010"），原界面二期顺延为 TASK-011，其后依序顺延 |
+| 2026-10-05 | TASK-010 前置调研 | 视频语义检索方案选型：**本机活体实测三条路线**（同批 14 帧 / 同样 10 个中文查询）——中文 CLIP 6/10、现有 Caption 路线 2/10、MobileCLIP2 1/10（英文对照 5/5）；MobileCLIP2 中文失效已实证到 tokenizer 机制层；逐一核实 8 个项目的许可证（**MaterialSearch GPL-3.0 / VideoSeek AGPL-3.0 不可采用**；`chinese-clip-vit-base-patch16` **权重未声明许可证**）；产出《视频语义检索方案选型》调研报告 |
