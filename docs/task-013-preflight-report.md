@@ -110,7 +110,14 @@ ModuleNotFoundError: No module named 'torch'
 | **C 不装 torch，自己写 Provider** | `pip install --no-deps` → `import ort_cpu_runtime`（837 行，**torch-free**）→ **自己实现 ~380 行编排**（参考音频加载 + 合成循环 + 文本分段） | **+约 50 MB** | **大** | ✅ **一致** |
 | **D 假 torch 替身 + 覆写私有方法** | 只在 import 那一瞬间把 `sys.modules['torch'/'torchaudio']` 换成最小替身，import 完撤掉；再继承 `OnnxTtsRuntime` 覆写 `_load_reference_audio`（用 `soundfile` 读 + numpy 重采样）—— 替身**只为满足顶层 import，从不执行** | +约 50 MB | 小-中（~30 行） | ✅ 一致 |
 
-**另外一条顺带值得注意的**：既然 A 要装 torch，**改用 PyTorch 版 MOSS 反而省 501 MB 权重**（226.8 MB vs 727.8 MB），而且那是上游的**主路径**。ONNX 版唯一的优势（免 torch）**在这个前提下不存在了**。
+**另外一条顺带值得注意的**：既然 A 要装 torch，**改用 PyTorch 版 MOSS 反而省 420 MB 权重**
+（PyTorch 双权重 **307.67 MB** = TTS 223.82 + tokenizer 83.85，对比 ONNX 双仓库 727.85 MB），
+而且那是上游的**主路径**。ONNX 版唯一的优势（免 torch）**在这个前提下不存在了**。
+
+> **更正（2026-10-05）**：本节初版写的是"省 **501 MB**（226.8 vs 727.8）"。
+> 那个 226.8 MB **只是 TTS 模型**，漏了音频 tokenizer 的 83.85 MB。
+> 正确的对照是 **双权重 307.67 MB vs 727.85 MB → 省 420.18 MB**。
+> 数字已按实测值更正。
 
 ### 2.5 我的建议：**A**
 
