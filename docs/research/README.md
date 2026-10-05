@@ -255,6 +255,31 @@ FORBIDDEN_IN_PLUGINS = [
 
 ---
 
+## 每日扫描判断记录
+
+每日 GitHub 扫描（`python tools/github_daily_scan.py`）扫到的项目，**判断过就要留痕**，
+免得同一个项目明天再被"重新发现"一次。
+
+| 项目 | 许可证 | 可商用 | 使用方式 | 架构冲突 | 结论 |
+|---|---|---|---|---|---|
+| `zenstory-ai/video-recap-skills` | MIT | ✅ | **参考** —— 只读其产物契约设计，**未取任何代码** | **有，明确**：它是**编程 Agent 的 skill 包**（Claude Code / Codex / OpenCode），AI 部分走**云端小米 MiMo API**；XBC 是"本地能力层 + 插件"，**方向不同**。它的**场景检测同样是 ffmpeg**（README 自述"本地只要 ffmpeg"）→ **没有可替代 V18 镜头切分的算法** | **不引入**（2026-10-05） |
+| `Aseiel/VideoHighlighter` | **AGPL-3.0** | ❌ | **忽略** | **强 copyleft 硬冲突**：网络提供服务也要开源全部源码；该项目自身另有付费 Pro 版双授权 | **不引入**（2026-10-05） |
+
+### 「有没有能替代 V18 手写镜头切分的项目」——当前答案：没有
+
+只看两个方向：
+
+1. **算法库**（PySceneDetect 是代表）：**已判过**（见 [PySceneDetect](#pyscenedetect)）——
+   它是一整套含 OpenCV 的重依赖，与"内核零依赖、插件尽量零依赖"冲突，**从零自写**。
+   XBC 现在用的是 **FFmpeg 原生 `select='gt(scene,T)',showinfo`** 解析 `pts_time`，
+   零额外依赖，已交付并被 TASK-009/011 实际使用。
+2. **端到端工具**（video-recap-skills / VideoHighlighter）：它们**没有比我们更强的切分算法**，
+   一个用 ffmpeg、一个是 AGPL，**都不构成替代方案**。
+
+**结论：V18 的镜头切分不需要换实现**，现有 FFmpeg 方案已经是"零依赖 + 可用"的最优解。
+
+---
+
 ## 逐项目说明
 
 ### pluggy
