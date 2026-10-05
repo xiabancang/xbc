@@ -27,6 +27,7 @@ def on_scan(self) -> None:                # 按钮版：工具在后台跑
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Callable
 
 from PySide6.QtCore import Signal
@@ -34,7 +35,39 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from ..bridge import BackgroundCall, ToolBridge
 
-__all__ = ["Page"]
+__all__ = ["Page", "describe_space", "space_line"]
+
+#: 模态的中文名 —— 界面上不出现 `image` / `text` 这种内部词
+_MODALITY_LABELS = {"image": "图片", "text": "文本"}
+
+
+def describe_space(space: Mapping[str, Any] | None) -> str:
+    """把向量空间渲染成一行给人看的话（TASK-013c）。
+
+    例：`向量空间：chinese_clip / chinese-clip-rn50 · 1024 维 · 图片`
+
+    **纯展示**：只搬工具返回的字段，不认识的就如实写出来，不猜、不推算。
+    """
+    if not space:
+        return "向量空间：未知"
+    parts = [f"{space.get('provider') or '?'} / {space.get('model') or '?'}"]
+    dim = space.get("dim")
+    if dim:
+        parts.append(f"{dim} 维")
+    modality = str(space.get("modality") or "").lower()
+    if modality:
+        parts.append(_MODALITY_LABELS.get(modality, modality))
+    return "向量空间：" + " · ".join(parts)
+
+
+def space_line(space: Mapping[str, Any] | None, note: str = "") -> str:
+    """一行空间描述；带降级提示时前面加 ⚠ 并接上原因。
+
+    **提示文案来自工具返回的 `note`，界面不自己判断该不该降级** ——
+    界面只负责显示，判断留在插件里（界面不含业务逻辑）。
+    """
+    text = describe_space(space)
+    return f"⚠ {text}　——　{note}" if note else text
 
 
 class Page(QWidget):

@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
 )
 
-from .base import Page
+from .base import Page, space_line
 
 __all__ = ["MatchPage"]
 
@@ -82,6 +82,12 @@ class MatchPage(Page):
         self.open_button.clicked.connect(self.on_open)
         open_row.addWidget(self.open_button)
         self.root.addLayout(open_row)
+
+        # ---- 这份结果用的向量空间（TASK-013c）----
+        # 常驻显示：状态栏会被下一条消息覆盖，这个不会。
+        self.space_label = QLabel("向量空间：（还没读取结果）")
+        self.space_label.setWordWrap(True)
+        self.root.addWidget(self.space_label)
 
         # ---- 分段表 ----
         self.root.addWidget(QLabel("分段与选中镜头"))
@@ -198,10 +204,13 @@ class MatchPage(Page):
                 self.segment_table.setItem(row, column, QTableWidgetItem(text))
         self.candidate_table.setRowCount(0)
         stale_count = result.value.get("stale_candidates", 0)
+        note = result.value.get("note") or ""
+        self.space_label.setText(space_line(result.value.get("space"), note))
         self.say(
             f"已读取「{result.value.get('name')}」：{len(segments)} 段"
             + (f"　⚠ 有 {stale_count} 个候选已失效（素材被替换或边界变了）"
                if stale_count else "")
+            + (f"　{note}" if note else "")
         )
         if segments:
             row = 0
@@ -266,6 +275,9 @@ class MatchPage(Page):
             ],
             "stale_candidates": 0,
             "version": value.get("version"),
+            # TASK-013c：把空间与降级提示带进 open 渲染，两个入口显示一致
+            "space": value.get("space") or {},
+            "note": value.get("note") or "",
         }))
 
     # ---------------- 分段 → 候选 ----------------

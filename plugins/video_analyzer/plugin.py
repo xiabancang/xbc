@@ -1158,6 +1158,8 @@ class VideoAnalyzerPlugin(XbcPlugin):
             "spaces_available": context["available"],
             "candidates": len(context["stored"]),
             "skipped_other_space": scored["skipped_other_space"],
+            # TASK-013c：`auto` 降级到文本空间时出声，不再静默
+            "note": self._space_note(space, context["chosen"]),
             "results": scored["results"],
         }
 
@@ -1238,6 +1240,8 @@ class VideoAnalyzerPlugin(XbcPlugin):
             "embedding": {
                 "provider": embedded.provider, "model": embedded.model,
                 "dim": len(query_vector),
+                # 模态由空间推导，界面靠它区分"图片空间 / 文本空间"（TASK-013c）
+                "modality": chosen.get("modality", ""),
             },
             "space": {"provider": chosen["provider"], "model": chosen["model"]},
             "skipped_other_space": skipped,
@@ -1268,6 +1272,41 @@ class VideoAnalyzerPlugin(XbcPlugin):
         return (
             next((s for s in spaces if s["modality"] == "image"), None)
             or spaces[0]
+        )
+
+    #: `auto` 挑不到图片空间时的**降级提示**（TASK-013c）。
+    #: 以前这一步是**静默**的 —— 库里只有 Caption 文本向量时会悄悄用文本空间
+    #: （实测 top-1 2/10，图片空间是 10/10），界面上看不出来，用户只能靠分数猜。
+    SPACE_DOWNGRADE_NOTE = (
+        "当前使用文本空间（Caption），质量弱于图片空间"
+        "：装好图片嵌入模型并重新扫描素材后会自动切到图片空间"
+        "（见工作台「图片嵌入」状态）"
+    )
+
+    @classmethod
+    def _space_note(cls, want: str, chosen: dict[str, Any]) -> str:
+        """只在 **`auto` 自动挑、且挑不到图片空间** 时出声（TASK-013c）。
+
+        用户**显式**写 `space="text"` 是主动选择（用于对比与复现），不打扰。
+        """
+        if want != "auto" or chosen.get("modality") == "image":
+            return ""
+        return cls.SPACE_DOWNGRADE_NOTE
+
+    @classmethod
+    def _stored_space_note(cls, space: dict[str, Any]) -> str:
+        """**已存结果**用的降级提示：那份结果当初是用文本空间算的。
+
+        与 `_space_note` 的区别：这个看的是**落盘快照里的 space**，
+        与当前机器上有没有图片模型无关 —— 说的是"这份结果的质量档位"。
+        """
+        modality = (space or {}).get("modality", "")
+        if not modality or modality == "image":
+            return ""
+        return (
+            "当前使用文本空间（这份结果是用 Caption 文本向量算的）"
+            "，质量弱于图片空间"
+            "：想升级就装好图片嵌入模型、重新扫描素材，再重跑一次匹配"
         )
 
     # ---------------- 文案 → 镜头匹配 ----------------
@@ -1357,6 +1396,8 @@ class VideoAnalyzerPlugin(XbcPlugin):
             "top_n": count,
             "space": payload["space"],
             "library_shots": payload["library_shots"],
+            # TASK-013c：`auto` 降级到文本空间时出声，不再静默
+            "note": self._space_note(space, chosen),
             "results": matched,
             "hint": (
                 "每段默认选中 top-1；用 match_select 换成别的镜头、"
@@ -1435,6 +1476,8 @@ class VideoAnalyzerPlugin(XbcPlugin):
             "script": payload.get("script", ""),
             "top_n": payload.get("top_n"),
             "space": payload.get("space", {}),
+            # TASK-013c：这份落盘结果当初用的是哪个空间，如实标注
+            "note": self._stored_space_note(payload.get("space", {})),
             "library_shots": payload.get("library_shots"),
             "created_at": payload.get("created_at", ""),
             "updated_at": payload.get("updated_at", ""),

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
 )
 
-from .base import Page
+from .base import Page, space_line
 
 __all__ = ["LibraryPage"]
 
@@ -83,6 +83,12 @@ class LibraryPage(Page):
         self.search_button.clicked.connect(self.on_search)
         search_row.addWidget(self.search_button)
         self.root.addLayout(search_row)
+
+        # ---- 本次检索用的向量空间（TASK-013c）----
+        # 常驻显示：状态栏会被下一条消息覆盖，这个不会被覆盖。
+        self.space_label = QLabel("向量空间：（还没检索过）")
+        self.space_label.setWordWrap(True)
+        self.root.addWidget(self.space_label)
 
         # ---- 结果表 ----
         self.table = QTableWidget(0, 6)
@@ -222,6 +228,7 @@ class LibraryPage(Page):
             for column, text in enumerate(cells):
                 self.table.setItem(row, column, QTableWidgetItem(text))
         note = value.get("note")
+        self.space_label.setText(space_line(value.get("embedding"), note or ""))
         self.say(
             f"「{value.get('query')}」命中 {value.get('count', len(results))} 个镜头"
             f"（{value.get('mode', '')}）" + (f"　{note}" if note else "")
