@@ -1432,17 +1432,20 @@ class CaseInsensitiveScanTests(unittest.TestCase):
             "大小写不敏感的扫描命中了禁止引用：\n" + "\n".join(self.scan(paths)),
         )
 
-    def test_global_scan_known_exception_is_documented(self) -> None:
-        """把"全局扫描并不干净"这个事实固化下来，免得以后误以为它是干净的。
+    def test_global_scan_is_clean(self) -> None:
+        """全局扫描**必须 0 命中**。
 
-        `plugins/knowledge_base` 的文档里出现了被禁词，但**它不是本任务的产物**，
-        本任务不改它（范围外只报告）。若哪天它被修好了，这条测试仍然通过。
+        这里原来有一条 `knowledge_base` 豁免特例：该插件的文档字符串里出现了被禁词，
+        但它不是本任务的产物，所以当时"范围外只报告"，测试只断言"没有**新的**命中"。
+
+        **TASK-013 已把它存档并从仓库删除**（存档与 SHA256 见
+        `docs/research/README.md`），豁免的前提不存在了，**豁免一并取消** ——
+        全局扫描恢复严格判定：一个命中都不许有。
         """
         offenders = self.scan(sorted(PLUGINS_DIR.rglob("*.py")))
-        unexpected = [item for item in offenders if "knowledge_base" not in item]
         self.assertEqual(
-            unexpected, [],
-            "除已知的 knowledge_base 之外出现了新的命中：\n" + "\n".join(unexpected),
+            offenders, [],
+            "全局扫描命中了禁止引用：\n" + "\n".join(offenders),
         )
 
 
