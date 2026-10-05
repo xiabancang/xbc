@@ -4,8 +4,8 @@
 
 | 模块 | 职责 |
 |---|---|
-| `types.py` | 能力枚举（含**文本/图片两种向量化**）、结果类型（含向量的跨 Provider 约束）、错误类型 |
-| `request.py` | 请求结构（`TextRequest` / `VisionRequest` / `EmbeddingRequest` / `ImageEmbeddingRequest`） |
+| `types.py` | 能力枚举（含**文本/图片两种向量化**与**语音合成**）、结果类型、错误类型 |
+| `request.py` | 请求结构（`TextRequest` / `VisionRequest` / `EmbeddingRequest` / `ImageEmbeddingRequest` / `SpeechRequest` / `VoiceCloneRequest`） |
 | `provider.py` | `ModelProvider` 抽象 + 视觉结果解析 + HTTP / 图片 / 代理工具 |
 | `providers/` | 两个真实实现：`ollama`（本地）、`openai_compatible` |
 | `service.py` | `AIService` 门面 + 显式装配 |
@@ -27,8 +27,10 @@ from .providers import OllamaProvider, OpenAICompatibleProvider
 from .request import (
     EmbeddingRequest,
     ImageEmbeddingRequest,
+    SpeechRequest,
     TextRequest,
     VisionRequest,
+    VoiceCloneRequest,
 )
 from .service import KNOWN_PROVIDERS, AIService, build_ai_service
 from .types import (
@@ -38,9 +40,11 @@ from .types import (
     AIUnavailable,
     AIUnsupported,
     EmbeddingResult,
+    SpeechResult,
     TextResult,
     VisionAnswer,
     VisionResult,
+    VoiceProfile,
 )
 
 __all__ = [
@@ -57,11 +61,15 @@ __all__ = [
     "ModelProvider",
     "OllamaProvider",
     "OpenAICompatibleProvider",
+    "SpeechRequest",
+    "SpeechResult",
     "TextRequest",
     "TextResult",
     "VisionAnswer",
     "VisionRequest",
     "VisionResult",
+    "VoiceCloneRequest",
+    "VoiceProfile",
     "base_url",
     "build_ai_service",
     "encode_image",

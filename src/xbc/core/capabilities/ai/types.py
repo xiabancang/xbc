@@ -60,6 +60,11 @@ class AICapability(str, Enum):
     #: 是两个不同的东西，声明成同一个能力会让路由选错 Provider。
     #: 两者的向量**不可互相比较** —— 见本模块开头那段跨 Provider 约束。
     IMAGE_EMBEDDING = "image_embedding"
+    #: 语音合成（含零样本声音克隆）。与 embedding 三兄弟**不是一回事**：
+    #: 它们输出向量，这里输出**语音文件**。
+    #: 单列一个能力的原因和 `IMAGE_EMBEDDING` 一样 —— 路由要能选对 Provider：
+    #: 一个只会向量化的 Provider 不该被语音请求选中。
+    SPEECH = "speech"
 
     def __str__(self) -> str:  # pragma: no cover - 展示用
         return self.value
@@ -225,6 +230,76 @@ class EmbeddingResult:
             "vectors": self.vectors,
             "dim": self.dim,
             "count": self.count,
+            "provider": self.provider,
+            "model": self.model,
+        }
+
+
+@dataclass
+class SpeechResult:
+    """语音合成（TTS）的结果。
+
+    **产物是一个语音文件**（`path`），不是一段字节流 —— 与其它能力一致地
+    落在"磁盘上的实体"上，调用方拿到路径就能播、能拼、能审计。
+    随路径一起回来的 `duration` / `sample_rate` / `channels` 是**实现方实测**的
+    语音属性，不是按文本长度猜的 —— 调用方不该再去解析语音文件才知道这些。
+    """
+
+    path: str
+    duration: float = 0.0
+    sample_rate: int = 0
+    channels: int = 0
+    #: 用了哪个声音（参考语音的标识，或内置音色名）
+    voice: str = ""
+    provider: str = ""
+    model: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "duration": self.duration,
+            "sample_rate": self.sample_rate,
+            "channels": self.channels,
+            "voice": self.voice,
+            "provider": self.provider,
+            "model": self.model,
+        }
+
+
+@dataclass
+class VoiceProfile:
+    """一次**音色登记**的结果。
+
+    ## 为什么它只是一个"描述"，而不是一条记录
+
+    Core **不保存任何声音**。这个结构描述的是"这段参考语音**能不能**当音色用、
+    它是什么规格"，落到磁盘上的**声音档案归调用方管**。
+
+    理由：**档案的组织方式与配额是调用方的事**（谁有几个声音、怎么分组、上限多少）。
+    让 Core 去持久化它，等于把调用方的领域概念搬进内核 ——
+    与"Core 不承载业务语义"直接冲突，也让 Core 需要知道一个它不该知道的目录结构。
+
+    `fingerprint` 是参考语音的**内容指纹**（实现方算的），调用方拿它当稳定标识：
+    换掉参考语音内容 → 指纹变 → 档案可以据此判断"这个声音的来源变了"。
+    """
+
+    name: str = ""
+    reference_audio: str = ""
+    fingerprint: str = ""
+    duration: float = 0.0
+    sample_rate: int = 0
+    channels: int = 0
+    provider: str = ""
+    model: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "reference_audio": self.reference_audio,
+            "fingerprint": self.fingerprint,
+            "duration": self.duration,
+            "sample_rate": self.sample_rate,
+            "channels": self.channels,
             "provider": self.provider,
             "model": self.model,
         }

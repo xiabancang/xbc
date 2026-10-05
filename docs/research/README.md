@@ -48,6 +48,95 @@
 
 ---
 
+## 架构决定：语音合成走「路线 D」（TASK-013，2026-10-05）
+
+TASK-013 要把**声音克隆**接进 Core 的 `speech` 能力。选型定的是 **MOSS-TTS-Nano**
+（Apache-2.0 代码 + 权重、官方 ONNX、226.8 MB、48 kHz 立体声），
+但它的官方 ONNX 版有一个说不通的地方，于是产生了三条实现路线，**甲方选了 D**。
+
+### 三条路线是什么
+
+| 路线 | 做法 | 运行环境增量 | 状态 |
+|---|---|---|---|
+| **A** | 装 PyTorch + torchaudio，直接用官方 ONNX 入口 | **+1188 MB** | 未选 |
+| **C** | 不装 PyTorch，以 `ort_cpu_runtime` 为底座**自己实现约 380 行编排** | +约 10 MB | **回退路径** |
+| **D** ✅ | 给上游一个"空壳 torch"，**只覆写一个私有方法**，其余走上游代码 | **+7.1 MB** | **已采用** |
+
+### 为什么需要 D：上游的说法与代码不符
+
+官方 ONNX 版 README 写 *"No PyTorch dependency during inference"*，
+**但 `onnx_tts_runtime.py` 第 12-13 行硬 `import torch` / `import torchaudio`**。
+
+实测（无 torch 环境跑官方入口）：
+
+```
+File "onnx_tts_runtime.py", line 12, in <module>
+  import torch
+ModuleNotFoundError: No module named 'torch'
+```
+
+而 torch 在整条链里**只被用来做一件事**：`_load_reference_audio` 读参考音频
+（加载 + 重采样）。装 1183 MB 的 torch 只为读一个 wav，代价不成比例。
+
+**规则上 torch 并不违规** —— [《AI 能力隔离》](../harness-rules.md) 的细化明确允许
+*"插件提供的 Provider 实现允许 import 本地推理运行时（仅限 Provider 文件使用）"*。
+所以这是**体积决策**，不是架构越界。
+
+### ⚠️ 本决定依赖的上游**私有** API（这是 D 的风险点）
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `OpenMOSS/MOSS-TTS-Nano` |
+| **提交** | **`8b7bcc9341b3b4ef3a3a58ba1338a7d85ff133eb`**（2026-09-06） |
+| `pyproject` 版本 | `0.1.0` |
+| 模块 / 类 | `onnx_tts_runtime.OnnxTtsRuntime` |
+| **私有方法** | **`_load_reference_audio(self, reference_audio_path)`**（该文件 L445） |
+| 该文件 SHA256(前 16) | `f4169a3ef0fdfb5e` |
+| 我们的实现 | `plugins/voice_tts/providers/moss_tts.py` |
+
+**依赖它的方式是"覆写"**：继承上游运行类，把 `_load_reference_audio` 换成
+`soundfile` + `soxr` 的实现（不做任何代码搬运，只覆写一个方法）。
+另外在**导入上游的那一瞬间**把 `torch` / `torchaudio` 换成空壳，导入完立刻撤除 ——
+空壳里那两个函数**故意会抛异常**，万一上游多出 torch 用法、覆写没盖住，会当场炸出来。
+
+### 失效触发条件（满足即重开）
+
+| # | 触发条件 | 为什么是它 |
+|---|---|---|
+| 1 | **上游 `onnx_tts_runtime.OnnxTtsRuntime._load_reference_audio` 改名 / 改签名 / 被删除** | 这是我们依赖的唯一私有 API；它没了，覆写就落空 |
+| 2 | **上游在 `onnx_tts_runtime.py` 里新增了别处对 `torch` / `torchaudio` 的使用** | 空壳会抛 `AssertionError` → 转成 `UpstreamContractError`；覆写只盖住了原有那一处 |
+| 3 | **上游发布真正的 torch-free 版本**（README 那句话真的兑现了） | 那就不需要 D 了，直接回到官方入口 |
+| 4 | `moss-tts-nano` 的许可证发生变化（代码或权重不再是 Apache-2.0） | 商用前提变了，选型要重算 |
+
+**守卫**：`plugins/voice_tts/providers/moss_tts.py::assert_upstream_contract()`
+在导入时检查那个私有方法在不在；不在就抛 `UpstreamContractError`，
+**消息里写明上游提交、失效原因、以及下面两条回退路径**。
+`tests/test_speech_capability.py::UpstreamContractGuardTests` 守着这条守卫
+（含"方法被改名时必须报错"的用例）。
+
+### 回退路径
+
+| 顺序 | 路线 | 代价 | 什么时候走 |
+|---|---|---|---|
+| 1 | **C —— 不装 PyTorch，自己实现编排** | 约 380 行编排（参考音频加载 + 文本分段 + 合成循环），**音频质量的调试风险要认** | 私有 API 消失，但不想装 PyTorch |
+| 2 | **A —— 装 PyTorch + torchaudio，用官方入口** | **+1188 MB** 运行环境 | 私有 API 消失，且宁可花磁盘也不想自己写编排 |
+
+两条都会**先在交付报告里报告，再动手**（A 类前置）—— 换路线是架构决定，不是实现细节。
+
+### 附带记录：两个实测到的上游坑
+
+| 坑 | 现象 | 我们的处理 |
+|---|---|---|
+| **WeTextProcessing 是硬依赖** | 默认路径 `No module named 'tn'` **直接崩**（不是降级）；它依赖的 `pynini` 在 Windows 上没有 wheel | 显式 `enable_wetext=False`，改用上游自带的 robust 归一化 |
+| **sentencepiece 打不开含非 ASCII 的路径** | 实测：纯 ASCII 路径 ✅ / 含中文路径 ❌ `NOT_FOUND Error #2`。而**默认数据根就是 `夏半仓工具箱`（含中文）** | 把 tokenizer 暂存到 ASCII 目录再加载；**对照实测 `onnxruntime` 能正常读中文路径**，所以只有 sentencepiece 需要绕 |
+
+> **附带发现一处既有命中**：`src/xbc/core/capabilities/ai/provider.py` 讲系统代理时写了
+> "Clash / 公司网关"。那里的"公司"是**网络代理**含义，与业务域无关；
+> 它早于 TASK-013，**本次未改**（范围外），在测试里明确记为"已知且不相关"。
+> 要不要一并改成"企业网关"之类，等你一句话。
+
+---
+
 ## 已过时 / 已放弃的项
 
 按"如某项已时过境迁，如实标注，不要强行填写"逐项核实：

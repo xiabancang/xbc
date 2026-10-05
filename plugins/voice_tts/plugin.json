@@ -1,0 +1,49 @@
+{
+  "id": "voice_tts",
+  "name": "语音合成与声音克隆",
+  "version": "0.1.0",
+  "spec_version": "1.0",
+  "api_version": "1.0",
+  "entry": "plugin.py:VoiceTtsPlugin",
+  "description": "把本地 TTS 引擎注册成 Core 的 speech 能力，并提供声音库（名称 ↔ 参考音频）。引擎按配置选择，新增引擎不需要改插件。",
+  "author": "夏半仓",
+  "capabilities": ["files", "settings", "events", "ai"],
+  "tools": [
+    {
+      "name": "voice_clone",
+      "description": "用一段参考音频登记一个声音（零样本克隆，不训练模型）。返回该声音的规格与内容指纹",
+      "risk": "write"
+    },
+    {
+      "name": "voice_list",
+      "description": "列出某个 owner 已登记的声音，以及还能再加几个",
+      "risk": "read"
+    },
+    {
+      "name": "voice_remove",
+      "description": "删掉某个 owner 的一个声音（只删档案，不动参考音频文件）",
+      "risk": "write"
+    },
+    {
+      "name": "voice_speak",
+      "description": "用已登记的声音把文本合成成音频文件（走 Core 的 speech 能力）",
+      "risk": "write"
+    }
+  ],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "engine": {
+        "type": "string",
+        "default": "moss_tts",
+        "description": "加载 providers/<engine>.py 作为 TTS 引擎"
+      },
+      "max_voices_per_owner": {
+        "type": "integer",
+        "default": 3,
+        "minimum": 1,
+        "description": "每个 owner 最多能登记几个声音"
+      }
+    }
+  }
+}

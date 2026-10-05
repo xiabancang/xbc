@@ -58,7 +58,9 @@ XBC/
 │  ├─ text_toolbox/          真实业务插件：纯本地文本处理
 │  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + ctx.ai 画面理解 + 素材资产库
 │  ├─ ai_test_plugin/        AI 能力层验收插件
-├─ tests/                    501 项测试
+│  ├─ voice_tts/            语音合成与声音克隆（注册 Core 的 speech 能力 + 声音档案）
+│  ├─ voice_test_plugin/    语音能力自检插件（只走 ctx.ai）
+├─ tests/                    536 项测试
 ├─ scripts/                  一次性运维脚本（如导出中文 CLIP 的 ONNX）
 └─ docs/                     技术方案、测试报告、调研报告
 ```
@@ -111,7 +113,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 501 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 536 tests / OK
 ```
 
 ---

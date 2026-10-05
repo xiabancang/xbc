@@ -1,0 +1,22 @@
+{
+  "id": "voice_test_plugin",
+  "name": "语音能力自检",
+  "version": "0.1.0",
+  "spec_version": "1.0",
+  "api_version": "1.0",
+  "entry": "plugin.py:VoiceTestPlugin",
+  "description": "验收用：只通过 ctx.ai 调用 speech 能力（登记音色 → 合成 → 回读核对），不接触任何模型实现。",
+  "author": "夏半仓",
+  "capabilities": ["files", "settings", "events", "ai"],
+  "tools": [
+    {
+      "name": "voice_selftest",
+      "description": "语音能力自检：登记音色 → 合成 → 回读产物核对规格。只通过 ctx.ai 说话，不接触任何模型实现",
+      "risk": "write"
+    }
+  ],
+  "config_schema": {
+    "type": "object",
+    "properties": {}
+  }
+}

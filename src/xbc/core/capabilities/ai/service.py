@@ -42,9 +42,19 @@ from .types import (
     AIUnavailable,
     AIUnsupported,
     EmbeddingResult,
+    SpeechResult,
     TextResult,
     VisionAnswer,
     VisionResult,
+    VoiceProfile,
+)
+from .request import (  # noqa: F401  —— 门面要用到
+    EmbeddingRequest,
+    ImageEmbeddingRequest,
+    SpeechRequest,
+    TextRequest,
+    VisionRequest,
+    VoiceCloneRequest,
 )
 
 Disposer = Callable[[], Any]
@@ -184,7 +194,7 @@ class AIService:
         except AIError:
             return False
 
-    # ---------------- 三个能力入口 ----------------
+    # ---------------- 能力入口 ----------------
     def text_generate(self, prompt: str, *, system: str | None = None) -> TextResult:
         """文本生成。输入：提示词 + 可选 system。"""
         chosen = self.provider(capability=AICapability.TEXT)
@@ -234,6 +244,33 @@ class AIService:
         chosen = self.provider(capability=AICapability.IMAGE_EMBEDDING)
         return chosen.embed_images(
             ImageEmbeddingRequest(images=[str(p) for p in items])
+        )
+
+    def synthesize(self, text: str, *, output_path: str, voice: str = "") -> SpeechResult:
+        """语音合成。输入：文本 + 输出路径 + 可选音色。
+
+        `voice` 留空时用实现方的默认音色。产物写到 `output_path`，
+        返回值里有**实测**的时长 / 采样率 / 声道数。
+
+        按 `AICapability.SPEECH` 路由 —— 只会向量化的 Provider 不会被误选，
+        而是抛出可读的 `AIUnsupported`。
+        """
+        chosen = self.provider(capability=AICapability.SPEECH)
+        return chosen.synthesize(
+            SpeechRequest(text=str(text), output_path=str(output_path), voice=str(voice))
+        )
+
+    def clone_voice(self, reference_audio: str, *, name: str = "") -> VoiceProfile:
+        """音色登记。输入：**本地参考语音路径**。
+
+        只接受本地路径 —— 与 `vision_analyze` / `embed_images` 同一条规矩。
+
+        **Core 不保存任何声音**：这个方法只确认"这段语音能不能当音色用"，
+        返回规格与指纹；声音库由调用方（插件）自己落盘。
+        """
+        chosen = self.provider(capability=AICapability.SPEECH)
+        return chosen.clone_voice(
+            VoiceCloneRequest(reference_audio=str(reference_audio), name=str(name))
         )
 
 

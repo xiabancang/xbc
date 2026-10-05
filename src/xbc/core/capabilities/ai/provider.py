@@ -27,7 +27,14 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from .request import EmbeddingRequest, ImageEmbeddingRequest, TextRequest, VisionRequest
+from .request import (
+    EmbeddingRequest,
+    ImageEmbeddingRequest,
+    SpeechRequest,
+    TextRequest,
+    VisionRequest,
+    VoiceCloneRequest,
+)
 from .types import (
     AICapability,
     AIError,
@@ -35,8 +42,10 @@ from .types import (
     AIUnavailable,
     AIUnsupported,
     EmbeddingResult,
+    SpeechResult,
     TextResult,
     VisionResult,
+    VoiceProfile,
 )
 
 
@@ -107,6 +116,21 @@ class ModelProvider(ABC):
         调用方要在选 Provider 的那一刻就能得到理由，而不是等到算出结果才发现不兼容。
         """
         raise AIUnsupported(f"Provider {self.name!r} 不支持图片向量化（embed_images）")
+
+    def synthesize(self, request: SpeechRequest) -> SpeechResult:
+        """语音合成：把 `request.text` 用 `request.voice` 的音色念出来，写到 `output_path`。
+
+        返回的 `SpeechResult` 里必须带上**实测**的 `duration` / `sample_rate` /
+        `channels`，不能按文本长度估算 —— 调用方要靠它做音画对齐（TASK-014）。
+        """
+        raise AIUnsupported(f"Provider {self.name!r} 不支持语音合成（synthesize）")
+
+    def clone_voice(self, request: VoiceCloneRequest) -> VoiceProfile:
+        """音色登记：确认这段参考语音能不能当音色用，返回它的规格与指纹。
+
+        **不落盘** —— 声音库归调用方管（见 `VoiceProfile` 的说明）。
+        """
+        raise AIUnsupported(f"Provider {self.name!r} 不支持音色登记（clone_voice）")
 
     # ---------- 公共 ----------
     def supports(self, capability: AICapability) -> bool:
