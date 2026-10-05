@@ -97,10 +97,35 @@ class _CallJob(QObject):
 
 
 class BackgroundCall(QObject):
-    """把慢工具调用挪到后台线程，结果回到主线程。
+    """把慢工具调用挪到后台线程，结果**回到主线程**。
 
     用法：`BackgroundCall(bridge, "library_scan", directory=...)`，
-    然后 `call.start(on_done)`。`on_done` 收到 `ToolResult` 或异常对象。
+    然后 `call.start(on_done)`。`on_done` 收到 `ToolResult`。
+
+    ## 这里踩过三个坑（TASK-012b 界面卡死的根因，都在这一个类里）
+
+    ### 坑 1：`job` 必须是成员，不能是局部变量
+
+    `job.moveToThread(thread)` **只改 C++ 线程亲和性，不增加 Python 引用**。
+    写成局部变量的话，`start()` 一返回引用计数就归零 → C++ 对象被销毁 →
+    `thread.started → job.run` 指向死对象 → **任务静默不执行**。
+    而 `thread.quit` 也连在 `job.done` 上 → 线程永不退出 → 退出程序时卡死。
+
+    ### 坑 2：回调的接收者必须是**主线程的 QObject**
+
+    直接把用户的闭包连到 `job.done` 会走 **`DirectConnection`** ——
+    信号在哪个线程发，回调就在哪个线程跑。而回调要碰控件
+    （`setEnabled` / 往表格写数据），Qt 规定控件只能在所属线程访问。
+
+    所以中间加一个 `self._relay`：`self` 是在主线程构造的 `QObject`，
+    Qt 会自动用 `QueuedConnection` 把它投递到主线程。
+
+    ### 坑 3：`thread.finished → thread.deleteLater` 与 `self._thread` 冲突
+
+    C++ 对象被删了，Python 侧 `self._thread` 还指着它 ——
+    之后任何 `self._thread.isRunning()`（`running` 属性 / `wait()`）都会碰到
+    已销毁的 C++ 对象。而且这条路径**恰恰在"线程终于能正常结束"之后才会被走到**，
+    所以坑 1 修好之后它才开始暴露。现在改成在线程结束时**主动清引用**。
 
     **不做队列、不做并发**：调用方负责在跑的时候禁用按钮。
     """
@@ -113,25 +138,52 @@ class BackgroundCall(QObject):
         self._tool = tool
         self._arguments = arguments
         self._thread: QThread | None = None
+        #: **强引用**后台任务对象 —— 见坑 1
+        self._job: _CallJob | None = None
+        #: 用户回调，在主线程执行
+        self._on_done: Callable[[Any], None] | None = None
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.isRunning()
+        thread = self._thread
+        return thread is not None and thread.isRunning()
 
     def start(self, on_done: Callable[[Any], None]) -> None:
         thread = QThread()
         job = _CallJob(self._bridge, self._tool, self._arguments)
         job.moveToThread(thread)
         thread.started.connect(job.run)
-        job.done.connect(on_done)
+
+        # 坑 2：接收者是 self（主线程 QObject）→ 自动 QueuedConnection → 主线程执行
+        job.done.connect(self._relay)
         job.done.connect(thread.quit)
         job.done.connect(job.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+
+        # 坑 3：不要 `thread.deleteLater()`，改为在线程结束时把引用放掉
+        thread.finished.connect(self._on_thread_finished)
+
+        self._on_done = on_done
+        self._job = job          # 坑 1：保住 job
         self._thread = thread
         thread.start()
 
+    def _relay(self, result: Any) -> None:
+        """`job.done` 的接收者。**信号从工作线程发，本方法在主线程跑。**
+
+        拿一次就把回调清掉 —— 一次调用只回一次，也避免持有闭包不放。
+        """
+        callback, self._on_done = self._on_done, None
+        if callback is not None:
+            callback(result)
+
+    def _on_thread_finished(self) -> None:
+        """线程真正结束了，才把引用放掉（坑 3）。"""
+        self._job = None
+        self._thread = None
+
     def wait(self, timeout_ms: int = 60_000) -> bool:
         """等它跑完。**只给测试用** —— 界面不应该阻塞等。"""
-        if self._thread is None:
+        thread = self._thread
+        if thread is None:
             return True
-        return bool(self._thread.wait(timeout_ms))
+        return bool(thread.wait(timeout_ms))

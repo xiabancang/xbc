@@ -59,7 +59,7 @@ XBC/
 │  ├─ video_analyzer/        业务插件：FFmpeg 结构分析 + ctx.ai 画面理解 + 素材资产库
 │  ├─ ai_test_plugin/        AI 能力层验收插件
 │  ├─ knowledge_base/        本地文档知识库（非本项目产物，未纳入版本管理）
-├─ tests/                    451 项测试
+├─ tests/                    478 项测试
 ├─ scripts/                  一次性运维脚本（如导出中文 CLIP 的 ONNX）
 └─ docs/                     技术方案、测试报告、调研报告
 ```
@@ -112,7 +112,7 @@ python run.py ui
 跑测试：
 
 ```powershell
-python -m unittest discover -s tests          # 期望 Ran 451 tests / OK
+python -m unittest discover -s tests          # 期望 Ran 478 tests / OK
 ```
 
 ---
