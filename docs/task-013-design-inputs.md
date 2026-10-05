@@ -94,6 +94,30 @@ timeline.json            多轨时间线（原声 / 旁白 / BGM / 字幕 / 叠�
 
 ---
 
+## 声音克隆候选（2026-10-05 扫描）
+
+TASK-013 若要配音，绕不开"用什么 TTS / 能不能克隆音色"。每日扫描（方向已收窄，
+新增"声音克隆"）第一次跑就带回来这几个，**先记着，等任务书下来再比**：
+
+| 项目 | 许可证 | 规模 | 是什么 | 备注 |
+|---|---|---|---|---|
+| [RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) | **MIT** | 62.3k★ | 1 分钟语音数据即可 few-shot 克隆的 TTS | **许可证最干净的一个** |
+| [OpenBMB/VoxCPM](https://github.com/OpenBMB/VoxCPM) | Apache-2.0 | 38.3k★ | Tokenizer-free 多语 TTS + 音色设计 + 克隆 | |
+| [DrewThomasson/ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) | Apache-2.0 | 20.3k★ | 电子书 → 有声书，带克隆，1158 语言 | **是个应用不是库**，参考价值大于引入价值 |
+| [k2-fsa/OmniVoice](https://github.com/k2-fsa/OmniVoice) | Apache-2.0 | 14.2k★ | 600+ 语言的克隆 TTS | |
+| [OpenMOSS/MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano) | Apache-2.0 | 4.4k★ | **1 亿参数、CPU 实时推理**、48kHz 立体声、克隆 | **CPU 友好 —— 最贴合我们"不假设有 GPU"的定位** |
+
+**已排除**（许可证硬冲突，见[台账](research/README.md)）：
+`debpalash/VoiceStudio`（AGPL-3.0）、`FurkanGozukara/Stable-Diffusion`（GPL-3.0）、
+`pnnbao97/VieNeu-TTS`（只支持越南语）。
+
+> ⚠️ **上表的许可证取自 GitHub API 的 `license.spdx_id`，不是读的 LICENSE 原文。**
+> 按台账规则，**真正采用前必须读原文**；而且**模型权重的许可证要单独查** ——
+> TASK-010 就踩过"代码 MIT 但权重未声明许可证"的坑（`chinese-clip-vit-base-patch16`）。
+> 这条在任务书下来、进入正式选型时必须补上。
+
+---
+
 ## 明确**不采用**的部分
 
 | 不做 | 为什么 |

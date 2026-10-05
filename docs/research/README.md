@@ -268,6 +268,15 @@ FORBIDDEN_IN_PLUGINS = [
 |---|---|---|---|---|---|
 | `zenstory-ai/video-recap-skills` | MIT | ✅ | **参考** —— 只读其产物契约设计，**未取任何代码** | **有，明确**：它是**编程 Agent 的 skill 包**（Claude Code / Codex / OpenCode），AI 部分走**云端小米 MiMo API**；XBC 是"本地能力层 + 插件"，**方向不同**。它的**场景检测同样是 ffmpeg**（README 自述"本地只要 ffmpeg"）→ **没有可替代 V18 镜头切分的算法** | **不引入**（2026-10-05） |
 | `Aseiel/VideoHighlighter` | **AGPL-3.0** | ❌ | **忽略** | **强 copyleft 硬冲突**：网络提供服务也要开源全部源码；该项目自身另有付费 Pro 版双授权 | **不引入**（2026-10-05） |
+| `line/lighthouse` | Apache-2.0 | ✅ | **参考（低优先）** —— 只记它的**输出形态**，未取代码 | **有**：① 任务是**视频内时间窗检索**（文本 → `[start, end, score]`），与我们的"整库选镜头"粒度不同；② 运行时**必须有 torch + torchaudio**（+ Slowfast / PANNs 权重）—— 我们刚在 TASK-010 费力做到运行时不要 torch；③ **视频上限 150 秒**（其 benchmark 决定），真实素材直接卡住 | **不引入**（2026-10-05）。可看的是它给每段打 `pred_saliency_scores`（显著性）的思路 |
+| `nebulabroadcast/nebula` | **GPL-3.0** | ❌ | **忽略** | 强 copyleft；且是 TypeScript 广播级 MAM，技术栈与形态都不符 | **不引入**（2026-10-05） |
+| `debpalash/VoiceStudio` | **AGPL-3.0** | ❌ | **忽略** | 强 copyleft 硬冲突 | **不引入**（2026-10-05） |
+| `FurkanGozukara/Stable-Diffusion` | **GPL-3.0** | ❌ | **忽略** | 强 copyleft；且是个 **Jupyter 杂货铺仓库**（SD / TTS / 深伪什么都塞），不是可依赖的工程 | **不引入**（2026-10-05） |
+| `pnnbao97/VieNeu-TTS` | Apache-2.0 | ✅ | **忽略** | 无冲突，但**只支持越南语** —— 我们用不上 | **不引入**（2026-10-05） |
+
+**另有 5 个 TTS / 声音克隆项目**（GPT-SoVITS / VoxCPM / ebook2audiobook / OmniVoice /
+MOSS-TTS-Nano）**不在本表** —— 它们不是"要不要引入"，而是 **TASK-013 的候选**，
+所以记在 [TASK-013 设计参考输入](task-013-design-inputs.md)的候选表里，等任务书下来再比。
 
 ### 「有没有能替代 V18 手写镜头切分的项目」——当前判断：没有
 

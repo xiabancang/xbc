@@ -36,76 +36,64 @@ API = "https://api.github.com/search/repositories"
 USER_AGENT = "xbc-daily-scan/0.1"
 
 # 与夏半仓工具箱路线图对应的关注方向。
-# 每条 = 一个方向，queries 里第一个是主查询（默认只跑主查询）。
+#
+# **范围由《Harness 工作规则》的「每日 GitHub 扫描（广度兜底）」定死：只扫这五个方向，
+# 无关领域不扫。** 加方向前先改规则，别在这里顺手加。
+#
+# 本列表是**纯数据**：扫描逻辑不认方向名，只按 `queries` 打 GitHub Search。
+#
+# 每条 = 一个方向，queries 里第一个是主查询（默认只跑主查询，`--deep` 才跑全部）。
 TOPICS: list[dict] = [
     {
-        "id": "shot_detection",
-        "label": "镜头切分 / 视频结构",
-        "why": "直接对标 V18 的镜头切分；可用于替换手写帧差算法",
+        "id": "video_processing",
+        "label": "视频处理",
+        "why": "镜头切分 / 视频结构 / 视频理解 / 多模态 —— 素材库与匹配的上游能力",
         "queries": [
             "scene detection video",
             "shot boundary detection",
             "video scene segmentation",
-        ],
-    },
-    {
-        "id": "video_understanding",
-        "label": "视频理解 / 多模态",
-        "why": "AI 视频助手插件的核心能力",
-        "queries": [
             "video understanding multimodal",
             "video captioning",
-            "video question answering",
         ],
     },
     {
-        "id": "local_ai",
-        "label": "本地模型 / Ollama 生态",
-        "why": "本地优先的 AI 能力接入",
+        "id": "material_management",
+        "label": "素材管理",
+        "why": "素材库、标签、检索、向量索引、媒体资产组织",
+        "queries": [
+            "media asset management",
+            "video asset library",
+            "media search embedding",
+        ],
+    },
+    {
+        "id": "ai_capability",
+        "label": "AI 能力层",
+        "why": "本地模型（Ollama 生态）、模型路由、能力层抽象 —— 本地优先的 AI 接入",
         "queries": [
             "ollama client",
             "local llm desktop",
-            "llm inference local",
+            "llm model router",
         ],
     },
     {
-        "id": "plugin_kernel",
-        "label": "插件机制 / 插件内核",
-        "why": "工具箱内核的插件契约与生命周期可参考",
+        "id": "voice_cloning",
+        "label": "声音克隆",
+        "why": "TTS、音色克隆、配音 —— 文案匹配之后的成片环节",
         "queries": [
-            "plugin system architecture",
-            "plugin framework python",
-            "application plugin manager",
+            "voice cloning tts",
+            "text to speech open source",
+            "voice conversion",
         ],
     },
     {
-        "id": "desktop_shell",
-        "label": "桌面工具箱 / PySide6 应用",
-        "why": "宿主界面与工具箱形态参考",
+        "id": "script_matching",
+        "label": "文案匹配",
+        "why": "文案 / 脚本与画面的匹配（**收窄到「文案」，不再泛扫营销自动化**）",
         "queries": [
-            "pyside6 desktop application",
-            "qt desktop toolbox",
-            "pyqt6 application framework",
-        ],
-    },
-    {
-        "id": "content_tools",
-        "label": "内容自动化 / 营销工具",
-        "why": "对应 AI知识库 / AI营销工具 / 直播分析 等插件方向",
-        "queries": [
-            "ai content automation",
-            "ai marketing automation",
-            "knowledge base rag desktop",
-        ],
-    },
-    {
-        "id": "licensing_store",
-        "label": "授权 / 插件商城 / 更新分发",
-        "why": "对应云端的会员、授权、插件商城",
-        "queries": [
-            "license key activation software",
-            "plugin marketplace platform",
-            "desktop app auto update",
+            "video moment retrieval",
+            "text video matching",
+            "script to video",
         ],
     },
 ]
@@ -156,7 +144,7 @@ def _throttle(min_interval: float) -> None:
     """全局请求限速。
 
     GitHub 未认证的 search 配额是 **10 次/分钟**，所以间隔必须加在每一次请求之间，
-    而不是只在"同一方向内的多个关键词"之间 —— 后者会让 7 个方向连续打出去直接 403。
+    而不是只在"同一方向内的多个关键词"之间 —— 后者会让多个方向连续打出去直接 403。
     """
     global _last_request_at
     if min_interval <= 0:
