@@ -408,10 +408,24 @@ FORBIDDEN_IN_PLUGINS = [
 | `debpalash/VoiceStudio` | **AGPL-3.0** | ❌ | **忽略** | 强 copyleft 硬冲突 | **不引入**（2026-10-05） |
 | `FurkanGozukara/Stable-Diffusion` | **GPL-3.0** | ❌ | **忽略** | 强 copyleft；且是个 **Jupyter 杂货铺仓库**（SD / TTS / 深伪什么都塞），不是可依赖的工程 | **不引入**（2026-10-05） |
 | `pnnbao97/VieNeu-TTS` | Apache-2.0 | ✅ | **忽略** | 无冲突，但**只支持越南语** —— 我们用不上 | **不引入**（2026-10-05） |
+| `FireRedTeam/FireRedTTS3` 🆕 | Apache-2.0（**代码与权重都是**，已分别查） | ✅ | **忽略** | **有，且是硬的**：① 依赖 **`flash_attn`**（要 CUDA 编译）→ **实质是 GPU-only**，直接撞"无 GPU 假设"；② **权重 19,814 MB（19.3 GB）** —— 是 MOSS 的 27 倍；③ 无 ONNX 路径；④ 模型卡 `language` 字段为空，**中文支持未声明** | **不引入**（2026-10-06） |
+| （一批）`oterm` / `mcp-client-for-ollama` / `conduit` / `chatbox` / `gpt_mobile` / `ollama-app` / `oriveo` / `rust-genai` | MIT / MIT / GPL-3.0 / GPL-3.0 / GPL-3.0 / Apache-2.0 / AGPL-3.0 / Apache-2.0 | 部分 ❌ | **忽略（整类）** | **无架构冲突可言 —— 因为它们不是这个品类**：8 个全是**面向最终用户的 LLM 聊天客户端**（终端 / 移动端 / 桌面）。XBC 是**插件平台 + 能力层**，不是聊天 UI；我们自己的 `OllamaProvider` 已经直连本地 Ollama，不需要中间客户端 | **不引入**（2026-10-06） |
+
+**2026-10-06 扫描结论**：命中 23 项，**新增 1 项**（FireRedTTS3，已判忽略）；
+其余 22 项**全部是此前判过的**（PySceneDetect 在逐项目登记表；voice-recap-skills /
+VideoHighlighter / nebula / lighthouse / VoiceStudio / Stable-Diffusion / VieNeu-TTS
+在本表；GPT-SoVITS / VoxCPM / OmniVoice / ebook2audiobook / MOSS-TTS-Nano 见下）。
+**今天没有值得跟进的新东西。**
 
 **另有 5 个 TTS / 声音克隆项目**（GPT-SoVITS / VoxCPM / ebook2audiobook / OmniVoice /
-MOSS-TTS-Nano）**不在本表** —— 它们不是"要不要引入"，而是 **TASK-013 的候选**，
-所以记在 [TASK-013 设计参考输入](task-013-design-inputs.md)的候选表里，等任务书下来再比。
+MOSS-TTS-Nano）**不在本表** —— 它们不是"要不要引入"，而是 **TASK-013 的候选**。
+
+> **该项已于 2026-10-05 结项**：选 **MOSS-TTS-Nano**，实现走
+> [「路线 D」](#架构决定语音合成走路线-dtask-0132026-10-05)。
+> **两个候选被许可证排除**：**OmniVoice**（权重 CC-BY-NC，且 `audio_tokenizer`
+> 子模块另叠 Boson Higgs Audio 2 Community License）、**ebook2audiobook**
+> （默认引擎 XTTS = Coqui CPML、MMS 路径 = CC-BY-NC-4.0）。
+> **GPT-SoVITS 留作回退**（中文听测不合格时按任务书改用它）。
 
 ### 「有没有能替代 V18 手写镜头切分的项目」——当前判断：没有
 
