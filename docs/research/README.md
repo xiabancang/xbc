@@ -417,6 +417,13 @@ VideoHighlighter / nebula / lighthouse / VoiceStudio / Stable-Diffusion / VieNeu
 在本表；GPT-SoVITS / VoxCPM / OmniVoice / ebook2audiobook / MOSS-TTS-Nano 见下）。
 **今天没有值得跟进的新东西。**
 
+**2026-10-07 扫描结论**：命中 23 项、**新增 0 项**。
+逐项比对两天的项目清单 —— **集合完全一致**（只有 star 数在涨：
+VoiceStudio 53,776→54,267、GPT-SoVITS 62,378→62,417、OmniVoice 14,252→14,287 等）。
+**每一项昨天都已判过，今天没有任何新判断要做。**
+（扫描器的过滤窗口是"最近 30 天内更新"，所以同一批项目会连续出现多日 ——
+这是正常的，不代表扫描失效。）
+
 **另有 5 个 TTS / 声音克隆项目**（GPT-SoVITS / VoxCPM / ebook2audiobook / OmniVoice /
 MOSS-TTS-Nano）**不在本表** —— 它们不是"要不要引入"，而是 **TASK-013 的候选**。
 
