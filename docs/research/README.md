@@ -410,6 +410,8 @@ FORBIDDEN_IN_PLUGINS = [
 | `pnnbao97/VieNeu-TTS` | Apache-2.0 | ✅ | **忽略** | 无冲突，但**只支持越南语** —— 我们用不上 | **不引入**（2026-10-05） |
 | `FireRedTeam/FireRedTTS3` 🆕 | Apache-2.0（**代码与权重都是**，已分别查） | ✅ | **忽略** | **有，且是硬的**：① 依赖 **`flash_attn`**（要 CUDA 编译）→ **实质是 GPU-only**，直接撞"无 GPU 假设"；② **权重 19,814 MB（19.3 GB）** —— 是 MOSS 的 27 倍；③ 无 ONNX 路径；④ 模型卡 `language` 字段为空，**中文支持未声明** | **不引入**（2026-10-06） |
 | （一批）`oterm` / `mcp-client-for-ollama` / `conduit` / `chatbox` / `gpt_mobile` / `ollama-app` / `oriveo` / `rust-genai` | MIT / MIT / GPL-3.0 / GPL-3.0 / GPL-3.0 / Apache-2.0 / AGPL-3.0 / Apache-2.0 | 部分 ❌ | **忽略（整类）** | **无架构冲突可言 —— 因为它们不是这个品类**：8 个全是**面向最终用户的 LLM 聊天客户端**（终端 / 移动端 / 桌面）。XBC 是**插件平台 + 能力层**，不是聊天 UI；我们自己的 `OllamaProvider` 已经直连本地 Ollama，不需要中间客户端 | **不引入**（2026-10-06） |
+| `fluxions-ai/vui` 🆕 | Apache-2.0（**代码与权重都查过**：GitHub 标 `NOASSERTION` 是它自己的归类怪癖，LICENSE 文件是标准 Apache 2.0；权重卡 `apache-2.0`） | ✅ | **忽略** | **有，且是决定性的**：权重卡 `language = ['en']`、tags 也是 `en` —— **只支持英文**；整篇 46K README **一次都没提** language / 多语言 / 中文。另外其定位是**实时对话语音**（Pipecat 集成、streaming、`flash-attention`、cu12/cu13），**GPU 向**，且要 `torch>=2.11` + torchaudio + torchcodec | **不引入**（2026-10-08）。**中文配音用不上** |
+| `OpenAssetIO/OpenAssetIO` 🆕 | Apache-2.0 | ✅ | **忽略** | 无冲突，但**不是这个场景**：它是给**影视/后期 CGI 流水线**用的「工具 ↔ 资产管理系统」**互通标准**（C++，host + manager 插件模型，对标 Maya/Nuke ↔ ShotGrid 那一层）。XBC 是**单机本地平台 + 自己的 SQLite 素材库**，规模与问题域都不同 | **不引入**（2026-10-08） |
 
 **2026-10-06 扫描结论**：命中 23 项，**新增 1 项**（FireRedTTS3，已判忽略）；
 其余 22 项**全部是此前判过的**（PySceneDetect 在逐项目登记表；voice-recap-skills /
@@ -423,6 +425,14 @@ VoiceStudio 53,776→54,267、GPT-SoVITS 62,378→62,417、OmniVoice 14,252→14
 **每一项昨天都已判过，今天没有任何新判断要做。**
 （扫描器的过滤窗口是"最近 30 天内更新"，所以同一批项目会连续出现多日 ——
 这是正常的，不代表扫描失效。）
+
+**2026-10-08 扫描结论**：命中 24 项、**新增 2 项**，两个都已判并留痕：
+`fluxions-ai/vui`（**只支持英文**，中文配音用不上）、`OpenAssetIO/OpenAssetIO`（影视流水线的
+互通标准，不是我们的问题域）。**两个都判忽略 —— 今天没有值得跟进的新东西。**
+
+同日 `FireRedTeam/FireRedTTS3` **从清单里消失**：它的 `pushed_at` 是 2026-09-08，
+掉出了"最近 30 天（> 2026-09-08）"的窗口 —— **这是窗口滚动的正常现象，不是它消失了**。
+判断仍以上面那一行为准（忽略：`flash_attn` 的 GPU 硬依赖 + 19.3 GB 权重）。
 
 **另有 5 个 TTS / 声音克隆项目**（GPT-SoVITS / VoxCPM / ebook2audiobook / OmniVoice /
 MOSS-TTS-Nano）**不在本表** —— 它们不是"要不要引入"，而是 **TASK-013 的候选**。
