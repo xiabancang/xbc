@@ -417,6 +417,10 @@ FORBIDDEN_IN_PLUGINS = [
 | `EnragedAntelope/youtube-screenshot-extractor` 🆕 | **MIT** | ✅ | **参考（低优先）** —— **只取"关键帧要过滤模糊帧"这个思路，不取代码** | 无许可证冲突。但它是个**下载/截图工具**（YouTube + 1000+ 站点或本地视频抽帧），**不是可嵌入的库** | **参考，不引入**（2026-10-27）。**理由见下** |
 | `NotPunchnox/rkllama` 🆕 | ⚠️ **GPL-3.0** | ❌ | **忽略** | **两条独立的排除理由**：① **GPL-3.0 强 copyleft** —— 采用即要求衍生作品整体 GPL，商用直接出局；② **平台完全不搭**：它是「**Rockchip NPU** 上的 Ollama 替代品」（在 RK3588 这类**嵌入式 ARM 开发板**上跑 `rkllm`），而 XBC 是 Windows x86 桌面 + Ollama（CPU/GPU） | **不引入**（2026-10-29） |
 | `sipeter/CloneTTS` 🆕 | ⚠️ **无（GitHub 检测不到任何许可证）** | ❌ | **忽略** | **两条独立的排除理由**：① **没有许可证 = 版权保留**，法律上比"未声明"更明确 —— 不能用；② **平台完全不搭**：它是 **Android 本地** TTS 引擎（"system-wide voice cloning"在安卓上），XBC 是 Windows 桌面 Python | **不引入**（2026-11-05） |
+| `bsisduck/video-analyzer-skill` 🆕 | ⚠️ **GPL-3.0** | ❌ | **忽略**（**但有一条观察，见下**） | **GPL-3.0 强 copyleft** → 不可采用；且它是 **Claude Code 技能**（一组 shell 脚本 `extract-frames.sh` / `extract-audio.sh`），不是库。场景检测同样依赖 **ffmpeg + ffprobe**，没有比我们更强的切分算法 | **不引入**（2026-11-19） |
+| `dolag233/Serpent` 🆕 | **MIT** | ✅ | **忽略**（**同类产品参照，不取代码**） | 无冲突。但它是 **TypeScript 的跨平台桌面数字资产管理软件**（游戏美术/影视后期/平面设计），是**应用**不是库 —— 形态与语言都不对。**值得记的是它的功能面**：海量资产类型（含 3D）、标签/评分/描述/过滤/搜索/合集、**插件系统**、**脚本 + MCP 调用**、内置 AI 分析、自带 ffmpeg/oiiotool | **不引入**（2026-11-19） |
+| `Tangkfan/Awesome-Temporal-Video-Grounding` 🆕 | 无（**论文清单**，非代码） | — | **参考（低优先）** | 无版权风险（只是链接清单）。**但任务粒度不同**：它收录的 TVG / VMR / TSG 论文解决的是「**在一个视频里定位某个时间窗**」，而 XBC 的文案匹配做的是「**整库选镜头**」—— 与 `line/lighthouse` 同一类差异，**不能直接照搬** | **参考，不引入**（2026-11-19） |
+| `mattt/ollama-swift` 🆕 | MIT | ✅ | **忽略** | **Swift** 的 Ollama 客户端库 —— 语言/平台不对；且我们自己的 `OllamaProvider` 已经直连本地 Ollama，不需要中间客户端 | **不引入**（2026-11-19） |
 
 > **为什么 `youtube-screenshot-extractor` 值得"参考"而不是纯忽略**：
 > 我们现在的关键帧是**按场景边界直接取 `keyframes_per_shot=3` 张，没有任何画质/模糊过滤**
@@ -457,6 +461,21 @@ FORBIDDEN_IN_PLUGINS = [
 | 2026-11-06 | 25 | 0 | — | **无失败查询**（不必补扫，无需合并两次），集合与 11-05 **完全一致** |
 | 2026-11-07 | 24 | 0 | — | **无失败查询**。唯一变化：`video-recap-skills` 掉出窗口（`pushed_at=2026-10-04` < 新窗口 `>2026-10-08`）—— **窗口滚动，已判过**（参考：只读产物契约设计） |
 | 2026-11-08 | 24 | 0 | — | **无失败查询**，集合与 11-07 **完全一致** |
+| 2026-11-19 | 27 | **4** | `video-analyzer-skill` → 忽略（GPL-3.0，Claude Code 技能）<br>`Serpent` → 忽略（TS 桌面应用，同类产品参照）<br>`Awesome-Temporal-Video-Grounding` → 参考（低优先，论文清单）<br>`ollama-swift` → 忽略（Swift） | 距上次 **11 天**；**无失败查询**。窗口前移到 `>2026-10-20`，`mcp-client-for-ollama` / `CloneTTS` 掉出、`ebook2audiobook` 回来（都已判过） |
+
+> **📌 2026-11-19 的一条「观察」（不是 bug，未验证）**：
+> `video-analyzer-skill` 提到「**跳过 Instagram/TikTok 下载视频里附带的缩略图流**」。
+> 我核对了我们的取流代码（`plugins/video_analyzer/plugin.py:1630`）：
+> ```python
+> video = next((s for s in streams if s.get("codec_type") == "video"), None)
+> ```
+> **取第一个视频流，没有过滤 `attached_pic` / `disposition`**。
+> 如果某类下载视频把封面缩略图作为**第一个**视频流，我们可能把它当成正片分析。
+>
+> **但我没有验证** —— 手上没有这类样本，全项目也搜不到 `attached_pic` 相关处理。
+> **所以这是"观察"，不是"已确认的 bug"。** 本次未改代码（那是素材库那一侧的事，得单独立项）。
+> 若甲方要做，最小验证方式：用 ffmpeg 给一个 mp4 附着封面（`-attach` + `disposition:attached_pic`），
+> 跑一次 `video_probe` 看 `video` 报的是哪个流。
 
 > **⚠️ 2026-11-05 发现的新机制坑：补扫会让「新增」被吞掉。**
 > 第一次扫描（`视频处理` 403 那次）把当时找到的 `sipeter/CloneTTS` **写进了 `seen.json`**；
