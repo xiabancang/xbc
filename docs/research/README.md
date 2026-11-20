@@ -462,6 +462,7 @@ FORBIDDEN_IN_PLUGINS = [
 | 2026-11-07 | 24 | 0 | — | **无失败查询**。唯一变化：`video-recap-skills` 掉出窗口（`pushed_at=2026-10-04` < 新窗口 `>2026-10-08`）—— **窗口滚动，已判过**（参考：只读产物契约设计） |
 | 2026-11-08 | 24 | 0 | — | **无失败查询**，集合与 11-07 **完全一致** |
 | 2026-11-19 | 27 | **4** | `video-analyzer-skill` → 忽略（GPL-3.0，Claude Code 技能）<br>`Serpent` → 忽略（TS 桌面应用，同类产品参照）<br>`Awesome-Temporal-Video-Grounding` → 参考（低优先，论文清单）<br>`ollama-swift` → 忽略（Swift） | 距上次 **11 天**；**无失败查询**。窗口前移到 `>2026-10-20`，`mcp-client-for-ollama` / `CloneTTS` 掉出、`ebook2audiobook` 回来（都已判过） |
+| 2026-11-20 | 27 | 0 | — | **无失败查询**。`ollama-swift` ↔ `mcp-client-for-ollama` 进出是 **AI 能力层 top-8 换位**，两个都已整批判过 |
 
 > **📌 2026-11-19 的一条「观察」（不是 bug，未验证）**：
 > `video-analyzer-skill` 提到「**跳过 Instagram/TikTok 下载视频里附带的缩略图流**」。
