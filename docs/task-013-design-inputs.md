@@ -116,6 +116,16 @@ TASK-013 若要配音，绕不开"用什么 TTS / 能不能克隆音色"。每�
 > TASK-010 就踩过"代码 MIT 但权重未声明许可证"的坑（`chinese-clip-vit-base-patch16`）。
 > 这条在任务书下来、进入正式选型时必须补上。
 
+> ### 📌 2026-11-24 追加：GPT-SoVITS **换仓库了**（**上表原行未改，保留当时的快照**）
+>
+> 上表里的链接 `RVC-Boss/GPT-SoVITS`（当时 62.3k★）**已不是正主**。
+> 查 GitHub API 确认：**正主搬到 `bilibili/GPT-SoVITS`**（64.2k★，`created_at=2024-01-14`，
+> `fork=False`）；而 `RVC-Boss/GPT-SoVITS` 现在是一个 **6★ 的 fork**（`parent=bilibili/GPT-SoVITS`）。
+> **许可证没变**（MIT，LICENSE 首行仍是 `Copyright (c) 2024 RVC-Boss`）。
+>
+> **以后提 GPT-SoVITS 请用 https://github.com/bilibili/GPT-SoVITS**，
+> 免得照着旧链接克隆到一个 6★ fork。完整记录见[台账的 2026-11-24 更正](research/README.md)。
+
 ---
 
 ## 明确**不采用**的部分
